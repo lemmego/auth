@@ -1,0 +1,22 @@
+package templates
+
+import "github.com/lemmego/lemmego/internal/models"
+
+templ Home(user *models.User) {
+    <div class="absolute right-2 top-2">
+        if user != nil {
+        <section class="flex space-x-2">
+            <p class="text-gray-700">{ user.GetUsername() }</p>
+            <form action="/logout" method="POST">
+                @csrf()
+                @method("delete")
+                <button class="text-indigo-500 btn btn-danger text-xs">(Log Out)</button>
+            </form>
+        </section>
+        }
+    </div>
+
+    <div class="flex flex-col h-screen justify-center items-center">
+        <p>To customize this page, edit this file: <kbd class="text-indigo-600">./templates/home.templ</kbd></p>
+    </div>
+}
