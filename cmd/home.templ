@@ -10,7 +10,7 @@ templ Home(user *models.User) {
             <form action="/logout" method="POST">
                 @csrf()
                 @method("delete")
-                <button class="text-indigo-500 btn btn-danger text-xs">(Log Out)</button>
+                <button class="text-indigo-500 text-xs">(Log Out)</button>
             </form>
         </section>
         }

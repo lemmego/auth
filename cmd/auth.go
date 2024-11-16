@@ -27,6 +27,9 @@ var routes []byte
 //go:embed home.templ
 var homeTempl []byte
 
+//go:embed Home.tsx
+var homeReact []byte
+
 var formFieldTypes = []string{"text", "textarea", "integer", "decimal", "boolean", "radio", "checkbox", "dropdown", "date", "time", "datetime", "file"}
 
 var userFields = []string{"first_name", "last_name", "username", "bio", "phone", "avatar"}
@@ -126,7 +129,7 @@ var authCmd = &cobra.Command{
 		createFormFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
 		createHandlerFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
 		createTemplateFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
-		createRoutesFiles(selectedUserFields, selectedOrgFields)
+		createRoutesFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
 	},
 }
 
@@ -410,6 +413,8 @@ func createFormFiles(flavor string, userFields []string, orgFields []string) {
 }
 
 func createHandlerFiles(flavor string, userFields []string, orgFields []string) {
+	createHandlersDir()
+
 	info, _ := debug.ReadBuildInfo()
 
 	sessionHandlers = bytes.Replace(sessionHandlers, buildTagBlock, []byte(``), 1)
@@ -469,10 +474,20 @@ func createTemplateFiles(flavor string, userFields []string, orgFields []string)
 		if err != nil {
 			log.Fatal(err)
 		}
+		return
+	}
+
+	if flavor == "react" {
+		homeReact = bytes.Replace(homeReact, tsNocheckBlock, []byte(``), 1)
+		err := fs.Write("./resources/js/Pages/Home.tsx", homeReact)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 }
 
-func createRoutesFiles(userFields []string, orgFields []string) {
+func createRoutesFiles(flavor string, userFields []string, orgFields []string) {
 	info, _ := debug.ReadBuildInfo()
 	routes = bytes.Replace(routes, buildTagBlock, []byte(``), 1)
 	fs := fsys.NewLocalStorage("")
@@ -481,6 +496,16 @@ func createRoutesFiles(userFields []string, orgFields []string) {
 	if len(orgFields) == 0 {
 		routes = bytes.Replace(routes, routesTenantBlock, []byte(``), 1)
 	}
+
+	if flavor == "templ" {
+		routes = bytes.Replace(routes, reactHomeViewBlock, []byte(``), 1)
+	}
+
+	if flavor == "react" {
+		routes = bytes.Replace(routes, templHomeViewBlock, []byte(``), 1)
+		routes = bytes.Replace(routes, templImportTemplatesBlock, []byte(``), 1)
+	}
+
 	routes = bytes.ReplaceAll(routes, defaultModuleName, []byte(info.Main.Path))
 
 	err := fs.Write("./internal/routes/auth.go", routes)
@@ -515,6 +540,15 @@ func createFormDir(flavor string) {
 			fmt.Println("Error creating forms directory:", err.Error())
 			return
 		}
+	}
+}
+
+func createHandlersDir() {
+	fs := fsys.NewLocalStorage("")
+	err := fs.CreateDirectory("./internal/handlers")
+	if err != nil {
+		fmt.Println("Error creating handlers directory:", err.Error())
+		return
 	}
 }
 

@@ -6,6 +6,10 @@ var buildTagBlock = []byte(`//go:build ignore
 
 `)
 
+var tsNocheckBlock = []byte(`//@ts-nocheck
+
+`)
+
 var loginHandlersOrgBlock = []byte(`
 
 	if orgId := c.Get("org_id").(uint); orgId != 0 {
@@ -81,3 +85,10 @@ var templImportResBlock = []byte(`"github.com/lemmego/api/res"`)
 var templImportSharedBlock = []byte(`"github.com/lemmego/api/shared"`)
 
 var templImportTemplatesBlock = []byte(`"github.com/lemmego/lemmego/templates"`)
+
+var templHomeViewBlock = []byte(`		return c.Templ(templates.BaseLayout(templates.Home(user)))
+`)
+
+var reactHomeViewBlock = []byte(`		return c.Inertia("Home", map[string]any{"user": user})
+
+`)

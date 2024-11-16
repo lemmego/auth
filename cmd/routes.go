@@ -41,5 +41,6 @@ func authRoutes(r app.Router) {
 	r.Get("/home", auth.Get().Guard, func(c *app.Context) error {
 		user := c.GetSession("user").(*models.User)
 		return c.Templ(templates.BaseLayout(templates.Home(user)))
+		return c.Inertia("Home", map[string]any{"user": user})
 	})
 }
