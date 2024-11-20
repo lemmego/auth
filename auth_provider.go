@@ -29,12 +29,12 @@ func init() {
 			panic(err)
 		}
 
-		Set(func(opts *Options) {
+		Set(New(func(opts *Options) {
 			opts.HomeRoute = "/home"
 			opts.Router = a.Router()
 			opts.DB = dbc
 			opts.Session = sess
-		})
+		}))
 
 		a.AddService(Get())
 

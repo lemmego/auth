@@ -94,10 +94,10 @@ func Get() *Auth {
 	return authInstance
 }
 
-func Set(opts ...OptFunc) {
+func Set(instance *Auth) {
 	mu.Lock()
 	defer mu.Unlock()
-	authInstance = New(opts...)
+	authInstance = instance
 }
 
 func DefaultOptions() *Options {
