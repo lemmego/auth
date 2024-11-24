@@ -2,14 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"github.com/lemmego/cli"
 	"github.com/lemmego/fsys"
 	"log"
 	"os"
 	"runtime/debug"
-
-	_ "embed"
+	"slices"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -124,12 +124,27 @@ var authCmd = &cobra.Command{
 		}
 
 		createMigrationFiles(selectedUserFields, selectedOrgFields)
+		fmt.Println("Created migration files in ./internal/migrations")
 		createModelFiles(selectedUserFields, selectedOrgFields)
+		fmt.Println("Created model files in ./internal/models")
 		createInputFiles(selectedUserFields, selectedOrgFields)
+		fmt.Println("Created input files in ./internal/inputs")
 		createFormFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
-		createHandlerFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
 		createTemplateFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
+		if selectedFrontend == "react" || selectedFrontend == "vue" {
+			fmt.Println("Created template files in ./resources/js/Pages/Forms")
+		} else {
+			fmt.Println("Created template files in ./templates")
+		}
+		createHandlerFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
+		fmt.Println("Created handler files in ./internal/handlers")
 		createRoutesFiles(selectedFrontend, selectedUserFields, selectedOrgFields)
+		fmt.Println("Created routes files in ./internal/routes")
+		fmt.Println("\nPlease uncomment authRoutes(r) in routes.go")
+		if selectedFrontend == "templ" {
+			fmt.Println("Make sure to compile the templ files")
+		}
+		fmt.Println("Run the migrations with: lemmego run migrate up")
 	},
 }
 
@@ -150,6 +165,19 @@ func generateUserMigration(userFields []*cli.MigrationField, hasOrg bool) {
 	}
 	if hasOrg {
 		config.PrimaryColumns = []string{"id", "org_id"}
+		config.UniqueColumns = [][]string{{"email", "org_id"}}
+
+		if slices.ContainsFunc(userFields, func(field *cli.MigrationField) bool {
+			return field.Name == "username"
+		}) {
+			config.UniqueColumns = append(config.UniqueColumns, []string{"username", "org_id"})
+		}
+
+		for _, field := range userFields {
+			if field.Unique {
+				field.Unique = false
+			}
+		}
 	} else {
 		config.PrimaryColumns = []string{"id"}
 	}
@@ -340,6 +368,12 @@ func createInputFiles(userFields []string, orgFields []string) {
 			Unique:   true,
 		}
 		registrationFields = append(registrationFields, orgUsernameFieldRegister)
+
+		for _, field := range registrationFields {
+			if field.Name == "email" {
+				field.Unique = false
+			}
+		}
 	}
 
 	loginGen := cli.NewInputGenerator(&cli.InputConfig{
@@ -419,30 +453,57 @@ func createHandlerFiles(flavor string, userFields []string, orgFields []string) 
 
 	sessionHandlers = bytes.Replace(sessionHandlers, buildTagBlock, []byte(``), 1)
 	registrationHandlers = bytes.Replace(registrationHandlers, buildTagBlock, []byte(``), 1)
+	registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:required_import_models`), regHandlerModelsImportBlock, 1)
+	registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:user_model`), userModelBytes(userFields), 1)
+
+	if slices.Contains(userFields, "avatar") {
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:required_import_fmt`), regHandlerFmtImportBlock, 1)
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:avatar`), registrationHandlersAvatarBlock, 1)
+	} else {
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:avatar`))
+	}
 
 	if flavor == "react" {
-		sessionHandlers = bytes.Replace(sessionHandlers, loginTemplFlavorBlock, []byte(``), 1)
-		sessionHandlers = bytes.Replace(sessionHandlers, templImportResBlock, []byte(``), 1)
-		sessionHandlers = bytes.Replace(sessionHandlers, templImportTemplatesBlock, []byte(``), 1)
+		sessionHandlers = bytes.Replace(sessionHandlers, []byte(`//inject:react_login`), loginReactFlavorBlock, 1)
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:react_register`), registrationReactFlavorBlock, 1)
 
-		registrationHandlers = bytes.Replace(registrationHandlers, registrationTemplFlavorBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, templImportResBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, templImportSharedBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, templImportTemplatesBlock, []byte(``), 1)
+		sessionHandlers = RemoveMarker(sessionHandlers, []byte(`//inject:templ_login`))
+		sessionHandlers = RemoveMarker(sessionHandlers, []byte(`//inject:res_import`))
+		sessionHandlers = RemoveMarker(sessionHandlers, []byte(`//inject:templates_import`))
+
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:templ_register`))
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:res_import`))
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:shared_import`))
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:templates_import`))
 	}
 
 	if flavor == "templ" {
-		sessionHandlers = bytes.Replace(sessionHandlers, loginReactFlavorBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, registrationReactFlavorBlock, []byte(``), 1)
+		sessionHandlers = bytes.Replace(sessionHandlers, []byte(`//inject:templ_login`), loginTemplFlavorBlock, 1)
+		sessionHandlers = bytes.Replace(sessionHandlers, []byte(`//inject:res_import`), templImportResBlock, 1)
+		sessionHandlers = bytes.Replace(sessionHandlers, []byte(`//inject:templates_import`), templImportTemplatesBlock, 1)
+
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:templ_register`), registrationTemplFlavorBlock, 1)
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:res_import`), templImportResBlock, 1)
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:shared_import`), templImportSharedBlock, 1)
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:templates_import`), templImportTemplatesBlock, 1)
+
+		sessionHandlers = RemoveMarker(sessionHandlers, []byte(`//inject:react_login`))
+		registrationHandlers = RemoveMarker(registrationHandlers, []byte(`//inject:react_register`))
 	}
 
-	// Remove tenant/org-specific code-blocks from the handlers
-	if len(orgFields) == 0 {
-		sessionHandlers = bytes.Replace(sessionHandlers, loginHandlersOrgBlock, []byte(``), 1)
+	if len(orgFields) > 0 {
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte("//inject:org_model"), orgModelBytes(orgFields), 1)
 
-		registrationHandlers = bytes.Replace(registrationHandlers, registrationHandlersOrgModelBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, registrationHandlersOrgLogoBlock, []byte(``), 1)
-		registrationHandlers = bytes.Replace(registrationHandlers, registrationHandlersOrgCreateBlock, []byte(``), 1)
+		if slices.Contains(orgFields, "org_logo") {
+			registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:required_import_fmt`), regHandlerFmtImportBlock, 1)
+			registrationHandlers = bytes.Replace(registrationHandlers, []byte("//inject:org_logo"), registrationHandlersOrgLogoBlock, 1)
+		} else {
+			registrationHandlers = RemoveMarker(registrationHandlers, []byte("//inject:org_logo"))
+		}
+
+		sessionHandlers = bytes.Replace(sessionHandlers, []byte(`//inject:org_login`), loginHandlersOrgBlock, 1)
+
+		registrationHandlers = bytes.Replace(registrationHandlers, []byte(`//inject:org_create`), registrationHandlersOrgCreateBlock, 1)
 	}
 
 	sessionHandlers = bytes.ReplaceAll(sessionHandlers, defaultModuleName, []byte(info.Main.Path))
@@ -452,9 +513,11 @@ func createHandlerFiles(flavor string, userFields []string, orgFields []string) 
 		"./internal/handlers/session_handlers.go",
 		sessionHandlers,
 	)
+
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	err = fs.Write(
 		"./internal/handlers/registration_handlers.go",
 		registrationHandlers,
@@ -492,7 +555,6 @@ func createRoutesFiles(flavor string, userFields []string, orgFields []string) {
 	routes = bytes.Replace(routes, buildTagBlock, []byte(``), 1)
 	fs := fsys.NewLocalStorage("")
 
-	// Remove tenant/org-specific code-blocks
 	if len(orgFields) == 0 {
 		routes = bytes.Replace(routes, routesTenantBlock, []byte(``), 1)
 	}

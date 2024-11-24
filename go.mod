@@ -8,8 +8,9 @@ require (
 	dario.cat/mergo v1.0.1
 	github.com/charmbracelet/huh v0.6.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
+	github.com/iancoleman/strcase v0.3.0
 	github.com/lemmego/api v0.0.0-20241119171149-c5ab8bf10b81
-	github.com/lemmego/cli v0.1.8
+	github.com/lemmego/cli v0.1.11
 	github.com/lemmego/fsys v0.0.0-20241023132523-b7be6cd88ee9
 	github.com/romsar/gonertia v1.3.4
 	github.com/spf13/cobra v1.8.1
@@ -69,7 +70,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.13.0 // indirect
-	github.com/iancoleman/strcase v0.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect

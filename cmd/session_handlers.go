@@ -6,13 +6,13 @@ import (
 	"encoding/gob"
 	"github.com/lemmego/api/app"
 	"github.com/lemmego/api/db"
-	"github.com/lemmego/api/res"
+	//inject:res_import
 	"github.com/lemmego/api/session"
 	"github.com/lemmego/api/shared"
 	"github.com/lemmego/auth"
 	"github.com/lemmego/lemmego/internal/inputs"
 	"github.com/lemmego/lemmego/internal/models"
-	"github.com/lemmego/lemmego/templates"
+	//inject:templates_import
 	"log/slog"
 )
 
@@ -21,18 +21,8 @@ func init() {
 }
 
 func SessionIndexHandler(c *app.Context) error {
-	data := res.TemplateData{}
-	if val, ok := c.PopSession("errors").(shared.ValidationErrors); ok {
-		data.ValidationErrors = val
-	}
-
-	return c.Templ(templates.BaseLayout(templates.Login(data)))
-	props := map[string]any{}
-	message := c.PopSessionString("message")
-	if message != "" {
-		props["message"] = message
-	}
-	return c.Inertia("Forms/Login", props)
+	//inject:templ_login
+	//inject:react_login
 }
 
 func SessionStoreHandler(c *app.Context) error {
@@ -55,9 +45,7 @@ func SessionStoreHandler(c *app.Context) error {
 		"email": body.Email,
 	}
 
-	if orgId := c.Get("org_id").(uint); orgId != 0 {
-		attrs["org_id"] = orgId
-	}
+	//inject:org_login
 
 	if err := db.Get().DB().Where(attrs).First(user).Error; err != nil {
 		slog.Error(err.Error())

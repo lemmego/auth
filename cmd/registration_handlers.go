@@ -3,26 +3,20 @@
 package handlers
 
 import (
-	"fmt"
-
+	//inject:required_import_fmt
+	//inject:required_import_models
 	"github.com/lemmego/api/app"
 	"github.com/lemmego/api/db"
-	"github.com/lemmego/api/res"
-	"github.com/lemmego/api/shared"
+	//inject:res_import
+	//inject:shared_import
 	"github.com/lemmego/api/utils"
 	"github.com/lemmego/lemmego/internal/inputs"
-	"github.com/lemmego/lemmego/internal/models"
-	"github.com/lemmego/lemmego/templates"
+	//inject:templates_import
 )
 
 func RegistrationIndexHandler(c *app.Context) error {
-	data := res.TemplateData{}
-	if val, ok := c.PopSession("errors").(shared.ValidationErrors); ok {
-		data.ValidationErrors = val
-	}
-
-	return c.Templ(templates.BaseLayout(templates.Register(data)))
-	return c.Inertia("Forms/Register", nil)
+	//inject:templ_register
+	//inject:react_register
 }
 
 func RegistrationStoreHandler(c *app.Context) error {
@@ -37,45 +31,11 @@ func RegistrationStoreHandler(c *app.Context) error {
 		return err
 	}
 
-	org := &models.Org{
-		OrgUsername: body.OrgUsername,
-		OrgName:     body.OrgName,
-		OrgEmail:    body.OrgEmail,
-	}
-
-	user := &models.User{
-		FirstName: body.FirstName,
-		LastName:  body.LastName,
-		Email:     body.Email,
-		Bio:       body.Bio,
-		Phone:     body.Phone,
-		Username:  body.Username,
-		Password:  password,
-	}
-
-	if c.HasFile("org_logo") {
-		_, err := c.Upload("org_logo", "images/orgs")
-
-		if err != nil {
-			return fmt.Errorf("could not upload org_logo: %w", err)
-		}
-		org.OrgLogo = "images/orgs/" + body.OrgLogo.Filename()
-	}
-
-	if c.HasFile("avatar") {
-		_, err := c.Upload("avatar", "images/avatars")
-
-		if err != nil {
-			return fmt.Errorf("could not upload avatar: %w", err)
-		}
-		user.Avatar = "images/avatars/" + body.Avatar.Filename()
-	}
-
-	if err := db.Get().DB().Create(org).Error; err != nil {
-		return err
-	} else {
-		user.OrgId = org.ID
-	}
+	//inject:org_model
+	//inject:user_model
+	//inject:org_logo
+	//inject:avatar
+	//inject:org_create
 
 	if err := db.Get().DB().Create(user).Error; err != nil {
 		return err
