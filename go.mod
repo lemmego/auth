@@ -10,7 +10,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.1
 	github.com/iancoleman/strcase v0.3.0
 	github.com/lemmego/api v0.0.0-20241119171149-c5ab8bf10b81
-	github.com/lemmego/cli v0.1.11
+	github.com/lemmego/cli v0.1.12
 	github.com/lemmego/fsys v0.0.0-20241023132523-b7be6cd88ee9
 	github.com/romsar/gonertia v1.3.4
 	github.com/spf13/cobra v1.8.1
