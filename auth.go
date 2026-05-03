@@ -2,17 +2,18 @@ package auth
 
 import (
 	"context"
-	"dario.cat/mergo"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+
+	"dario.cat/mergo"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lemmego/api/app"
 	"github.com/lemmego/api/session"
 	"golang.org/x/crypto/bcrypt"
-	"net/http"
-	"strings"
 )
 
 var (
@@ -228,5 +229,5 @@ func (a *Auth) Logout(ctx context.Context) {
 }
 
 func Get(a app.App) *Auth {
-	return a.Service(&Auth{}).(*Auth)
+	return app.Get[*Auth](a)
 }
