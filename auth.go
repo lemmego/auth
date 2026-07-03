@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -266,10 +265,26 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 	return loginResult
 }
 
-func (a *Auth) Logout(ctx context.Context) {
+// Logout clears the user's session and removes the JWT cookie.
+func (a *Auth) Logout(c app.Context) {
 	if a.sess != nil {
-		a.sess.Pop(ctx, UserKey)
+		a.sess.Pop(c.RequestContext(), UserKey)
 	}
+	c.SetCookie(&http.Cookie{
+		Name:     "jwt",
+		Value:    "",
+		Path:     a.cookiePath,
+		Domain:   a.cookieDomain,
+		Secure:   a.cookieSecure,
+		HttpOnly: a.cookieHTTPOnly,
+		SameSite: a.cookieSameSite,
+		MaxAge:   -1,
+	})
+}
+
+// Logout clears the user's session and removes the JWT cookie.
+func Logout(c app.Context) {
+	Get(c.App()).Logout(c)
 }
 
 func Get(a app.App) *Auth {
