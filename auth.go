@@ -84,6 +84,15 @@ func Protected(c app.Context) error {
 	return Get(c.App()).Protected(c)
 }
 
+// OptionalAuth checks for an authenticated user without blocking the request.
+// If a valid session or JWT token is found, the user is silently populated in
+// the context. Unlike Protected/Guest this never blocks — it always allows the
+// request to proceed. Useful for public routes that optionally show user info.
+func OptionalAuth(c app.Context) error {
+	_ = Get(c.App()).Check(c)
+	return c.Next()
+}
+
 func Login(c app.Context, provider UserProvider, username, password string) *LoginResult {
 	return Get(c.App()).Login(c, provider, username, password)
 }
@@ -137,7 +146,7 @@ func (a *Auth) Check(c app.Context) error {
 			return errors.New("jwt cookie not found")
 		}
 
-		token, err := jwt.Parse(jwtToken, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(jwtToken, func(token *jwt.Token) (any, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
