@@ -12,6 +12,7 @@ import (
 	"dario.cat/mergo"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lemmego/api/app"
+	"github.com/lemmego/api/config"
 	"github.com/lemmego/api/session"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -40,10 +41,15 @@ type Provider struct {
 }
 
 type Auth struct {
-	sess      *session.Session
-	jwtSecret []byte
-	jwtClaims jwt.MapClaims
-	homeRoute string
+	sess             *session.Session
+	jwtSecret        []byte
+	jwtClaims        jwt.MapClaims
+	homeRoute        string
+	cookiePath       string
+	cookieDomain     string
+	cookieSecure     bool
+	cookieHTTPOnly   bool
+	cookieSameSite   http.SameSite
 }
 
 type LoginResult struct {
@@ -67,11 +73,35 @@ func (ap *Provider) Provide(a app.App) error {
 		jwtSecret = ap.Opts.JwtSecret
 	}
 
-	auth := &Auth{sess: sess, jwtSecret: []byte(jwtSecret), homeRoute: "/home"}
+	auth := &Auth{
+		sess:             sess,
+		jwtSecret:        []byte(jwtSecret),
+		homeRoute:        "/home",
+		cookiePath:       "/",
+		cookieDomain:     "",
+		cookieSecure:     false,
+		cookieHTTPOnly:   true,
+		cookieSameSite:   http.SameSiteLaxMode,
+	}
 
 	if ap.Opts.HomeRoute != "" {
 		auth.homeRoute = ap.Opts.HomeRoute
 	}
+
+	// Read cookie settings from session config
+	if sessionCfg := a.Config().Get("session"); sessionCfg != nil {
+		if sc, ok := sessionCfg.(config.M); ok {
+			if v := sc.String("path", ""); v != "" {
+				auth.cookiePath = v
+			}
+			if v := sc.String("domain", ""); v != "" {
+				auth.cookieDomain = v
+			}
+			auth.cookieSecure = sc.Bool("secure", false)
+			auth.cookieHTTPOnly = sc.Bool("http_only", true)
+		}
+	}
+
 	a.AddService(auth)
 	return nil
 }
@@ -223,8 +253,13 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 
 	if loginResult.JwtToken != "" {
 		c.SetCookie(&http.Cookie{
-			Name:  "jwt",
-			Value: loginResult.JwtToken,
+			Name:     "jwt",
+			Value:    loginResult.JwtToken,
+			Path:     a.cookiePath,
+			Domain:   a.cookieDomain,
+			Secure:   a.cookieSecure,
+			HttpOnly: a.cookieHTTPOnly,
+			SameSite: a.cookieSameSite,
 		})
 	}
 
