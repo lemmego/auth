@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
-	"dario.cat/mergo"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lemmego/api/app"
 	"github.com/lemmego/api/config"
@@ -32,6 +34,7 @@ type Opts struct {
 	DisableSession bool
 	JwtSecret      string
 	JwtClaims      jwt.MapClaims
+	JwtExpiration  time.Duration
 	HomeRoute      string
 }
 
@@ -40,15 +43,16 @@ type Provider struct {
 }
 
 type Auth struct {
-	sess             *session.Session
-	jwtSecret        []byte
-	jwtClaims        jwt.MapClaims
-	homeRoute        string
-	cookiePath       string
-	cookieDomain     string
-	cookieSecure     bool
-	cookieHTTPOnly   bool
-	cookieSameSite   http.SameSite
+	sess           *session.Session
+	jwtSecret      []byte
+	jwtClaims      jwt.MapClaims
+	homeRoute      string
+	cookiePath     string
+	cookieDomain   string
+	cookieSecure   bool
+	cookieHTTPOnly bool
+	cookieSameSite http.SameSite
+	jwtExpiration  time.Duration
 }
 
 type LoginResult struct {
@@ -62,7 +66,7 @@ func New() *Auth {
 }
 
 func (ap *Provider) Provide(a app.App) error {
-	fmt.Println("Registering Auth")
+	slog.Debug("Registering Auth")
 	var sess *session.Session
 	var jwtSecret string
 	if !ap.Opts.DisableSession {
@@ -73,18 +77,22 @@ func (ap *Provider) Provide(a app.App) error {
 	}
 
 	auth := &Auth{
-		sess:             sess,
-		jwtSecret:        []byte(jwtSecret),
-		homeRoute:        "/home",
-		cookiePath:       "/",
-		cookieDomain:     "",
-		cookieSecure:     false,
-		cookieHTTPOnly:   true,
-		cookieSameSite:   http.SameSiteLaxMode,
+		sess:           sess,
+		jwtSecret:      []byte(jwtSecret),
+		homeRoute:      "/home",
+		cookiePath:     "/",
+		cookieDomain:   "",
+		cookieSecure:   a.InProduction(),
+		cookieHTTPOnly: true,
+		cookieSameSite: http.SameSiteLaxMode,
+		jwtExpiration:  24 * time.Hour,
 	}
 
 	if ap.Opts.HomeRoute != "" {
 		auth.homeRoute = ap.Opts.HomeRoute
+	}
+	if ap.Opts.JwtExpiration > 0 {
+		auth.jwtExpiration = ap.Opts.JwtExpiration
 	}
 
 	// Read cookie settings from session config
@@ -96,7 +104,7 @@ func (ap *Provider) Provide(a app.App) error {
 			if v := sc.String("domain", ""); v != "" {
 				auth.cookieDomain = v
 			}
-			auth.cookieSecure = sc.Bool("secure", false)
+			auth.cookieSecure = cookieSecureValue(a.InProduction(), sc)
 			auth.cookieHTTPOnly = sc.Bool("http_only", true)
 		}
 	}
@@ -175,29 +183,46 @@ func (a *Auth) Check(c app.Context) error {
 			return errors.New("jwt cookie not found")
 		}
 
-		token, err := jwt.Parse(jwtToken, func(token *jwt.Token) (any, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-
-			return a.jwtSecret, nil
-		})
-
+		authUser, err := a.jwtUser(jwtToken)
 		if err != nil {
 			return err
 		}
-
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			var authUser map[string]any
-			if err = json.Unmarshal([]byte(claims["user"].(string)), &authUser); err != nil {
-				return err
-			}
-			c.Set(UserKey, authUser)
-			return nil
-		}
+		c.Set(UserKey, authUser)
+		return nil
 	}
 
 	return nil
+}
+
+func (a *Auth) jwtUser(rawToken string) (map[string]any, error) {
+	token, err := jwt.Parse(rawToken, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		return a.jwtSecret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !token.Valid {
+		return nil, errors.New("invalid jwt")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("invalid jwt claims")
+	}
+	encodedUser, ok := claims["user"].(string)
+	if !ok || encodedUser == "" {
+		return nil, errors.New("invalid jwt user claim")
+	}
+
+	var authUser map[string]any
+	if err := json.Unmarshal([]byte(encodedUser), &authUser); err != nil {
+		return nil, err
+	}
+	return authUser, nil
 }
 
 func (a *Auth) Login(c app.Context, userProvider UserProvider, username, password string) *LoginResult {
@@ -225,17 +250,21 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 	}
 
 	if string(a.jwtSecret) != "" {
+		claims := make(jwt.MapClaims, len(defaultClaims)+len(a.jwtClaims)+2)
 		if a.jwtClaims != nil {
-			err = mergo.Merge(a.jwtClaims, defaultClaims)
-
-			if err != nil {
-				loginResult.Err = errors.New("provided claims could not be merged with the default claims")
-				return loginResult
+			for key, value := range a.jwtClaims {
+				claims[key] = value
 			}
-			token = jwt.NewWithClaims(jwt.SigningMethodHS256, a.jwtClaims)
-		} else {
-			token = jwt.NewWithClaims(jwt.SigningMethodHS256, defaultClaims)
 		}
+		for key, value := range defaultClaims {
+			if _, exists := claims[key]; !exists {
+				claims[key] = value
+			}
+		}
+		now := time.Now()
+		claims["iat"] = now.Unix()
+		claims["exp"] = now.Add(a.jwtExpirationOrDefault()).Unix()
+		token = jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 		tokenString, err := token.SignedString(a.jwtSecret)
 		if err != nil {
@@ -246,11 +275,11 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 		loginResult.JwtToken = tokenString
 	}
 
-	if a.sess != nil {
+	if a.sess != nil && c != nil {
 		a.sess.Put(c.RequestContext(), UserKey, userProvider)
 	}
 
-	if loginResult.JwtToken != "" {
+	if loginResult.JwtToken != "" && c != nil {
 		c.SetCookie(&http.Cookie{
 			Name:     "jwt",
 			Value:    loginResult.JwtToken,
@@ -263,6 +292,28 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 	}
 
 	return loginResult
+}
+
+func (a *Auth) jwtExpirationOrDefault() time.Duration {
+	if a.jwtExpiration > 0 {
+		return a.jwtExpiration
+	}
+	return 24 * time.Hour
+}
+
+func cookieSecureValue(production bool, settings config.M) bool {
+	secure := production
+	if value, ok := settings["secure"]; ok {
+		switch value := value.(type) {
+		case bool:
+			secure = value
+		case string:
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				secure = parsed
+			}
+		}
+	}
+	return secure
 }
 
 // Logout clears the user's session and removes the JWT cookie.
