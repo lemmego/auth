@@ -3,8 +3,9 @@ module github.com/lemmego/auth
 go 1.27
 
 require (
+	github.com/alexedwards/scs/v2 v2.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/lemmego/api v0.1.3
+	github.com/lemmego/api v0.1.32
 	golang.org/x/crypto v0.48.0
 )
 
@@ -22,7 +23,6 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.49.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.49.0 // indirect
 	github.com/a-h/templ v0.3.943 // indirect
-	github.com/alexedwards/scs/v2 v2.8.0 // indirect
 	github.com/aws/aws-sdk-go v1.55.5 // indirect
 	github.com/census-instrumentation/opencensus-proto v0.4.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -47,15 +47,14 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/lemmego/fsys v0.0.0-20241023123145-f7699143d54c // indirect
-	github.com/lemmego/gpa v0.1.1 // indirect
-	github.com/lemmego/migration v0.1.12 // indirect
+	github.com/lemmego/fsys v0.1.0 // indirect
+	github.com/lemmego/migration v0.1.19 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/romsar/gonertia v1.3.5 // indirect
+	github.com/romsar/gonertia/v3 v3.0.0 // indirect
 	github.com/spf13/cobra v1.8.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.opencensus.io v0.24.0 // indirect

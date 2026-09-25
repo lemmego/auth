@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -298,6 +299,20 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 	}
 
 	if a.sess != nil && c != nil {
+		// Rotate the session id before the identity is written into it.
+		// Without this an attacker who can plant a session cookie in the
+		// victim's browser before they log in still holds a valid id
+		// afterwards, and is authenticated as them — session fixation.
+		// RenewToken issues a new id and carries the existing data across,
+		// so the CSRF token in the session survives and the next request is
+		// not rejected as expired.
+		//
+		// A failure here fails the login: completing it would leave the user
+		// authenticated under the id the attacker chose.
+		if err := a.renewSession(c.RequestContext()); err != nil {
+			loginResult.Err = err
+			return loginResult
+		}
 		a.sess.Put(c.RequestContext(), UserKey, userProvider)
 	}
 
@@ -314,6 +329,41 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 	}
 
 	return loginResult
+}
+
+// renewSession rotates the session id, keeping the data in it. It is the
+// session-fixation defence: an attacker who plants a session cookie in the
+// victim's browser before they log in must not still hold a valid id after.
+func (a *Auth) renewSession(ctx context.Context) error {
+	if a.sess == nil {
+		return nil
+	}
+	if err := a.sess.RenewToken(ctx); err != nil {
+		return fmt.Errorf("renewing the session on login: %w", err)
+	}
+	return nil
+}
+
+// clearSession destroys the session behind a logout, so the id it was
+// authenticated under stops being valid and nothing outlives the logged-in
+// user. Anything written afterwards lands in a fresh session.
+func (a *Auth) clearSession(ctx context.Context) {
+	if a.sess == nil {
+		return
+	}
+	err := a.sess.Destroy(ctx)
+	if err == nil {
+		return
+	}
+
+	// The store refused to delete the record, so the data is still there and
+	// the user would stay logged in. Remove the identity and rotate the id
+	// explicitly rather than report a logout that did not happen.
+	slog.Error("auth: could not destroy the session on logout", "error", err)
+	a.sess.Pop(ctx, UserKey)
+	if err := a.sess.RenewToken(ctx); err != nil {
+		slog.Error("auth: could not rotate the session id on logout", "error", err)
+	}
 }
 
 func (a *Auth) jwtExpirationOrDefault() time.Duration {
@@ -339,10 +389,13 @@ func cookieSecureValue(production bool, settings config.M) bool {
 }
 
 // Logout clears the user's session and removes the JWT cookie.
+//
+// The whole session is destroyed rather than just the user key, so the id the
+// session was authenticated under stops being valid and no other data outlives
+// the logged-in user. Anything written afterwards — a flash message on the way
+// to the login page, say — lands in a fresh session.
 func (a *Auth) Logout(c app.Context) {
-	if a.sess != nil {
-		a.sess.Pop(c.RequestContext(), UserKey)
-	}
+	a.clearSession(c.RequestContext())
 	c.SetCookie(&http.Cookie{
 		Name:     "jwt",
 		Value:    "",
