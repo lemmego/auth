@@ -80,12 +80,14 @@ func (ap *Provider) Provide(a app.App) error {
 		jwtSecret = ap.Opts.JwtSecret
 	}
 
-	// Catch the misconfiguration at boot rather than letting every request
-	// fall through unauthenticated.
+	// Warn rather than refuse. Failing here would be circular: `lemmego run
+	// appkey` boots this same provider stack to generate APP_KEY, which is
+	// where the JWT secret usually comes from, so a hard error leaves a fresh
+	// project unable to generate the key that would fix it. Check still fails
+	// closed, so no request is authenticated in this state.
 	if sess == nil && jwtSecret == "" {
-		return fmt.Errorf(
-			"auth: sessions are disabled and no JWT secret is set, so no request could be authenticated; " +
-				"set JwtSecret (commonly from JWT_SECRET, falling back to APP_KEY) or leave sessions enabled")
+		slog.Warn("auth: sessions are disabled and no JWT secret is set, so no request can be authenticated; " +
+			"set JwtSecret (commonly from JWT_SECRET, falling back to APP_KEY) or leave sessions enabled")
 	}
 
 	auth := &Auth{

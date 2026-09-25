@@ -8,7 +8,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lemmego/api/config"
 	"golang.org/x/crypto/bcrypt"
-	"strings"
 )
 
 func TestLoginRequiresHashedPassword(t *testing.T) {
@@ -161,21 +160,5 @@ func TestCheckFailsClosedWithoutAnyMechanism(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoAuthMechanism) {
 		t.Fatalf("expected ErrNoAuthMechanism, got %v", err)
-	}
-}
-
-// The provider refuses to start in the broken configuration, so the problem
-// surfaces at boot rather than as silently open routes.
-func TestProviderRejectsUnauthenticatableConfig(t *testing.T) {
-	provider := &Provider{Opts: &Opts{DisableSession: true, JwtSecret: ""}}
-
-	err := provider.Provide(nil)
-	if err == nil {
-		t.Fatal("expected the provider to refuse a configuration that can authenticate nothing")
-	}
-	for _, want := range []string{"JwtSecret", "APP_KEY"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("the error should say how to fix it, got: %v", err)
-		}
 	}
 }
