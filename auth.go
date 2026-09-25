@@ -61,6 +61,10 @@ type LoginResult struct {
 	Cookie   *http.Cookie
 }
 
+// ErrNoAuthMechanism reports that neither a session nor a JWT secret is
+// configured, so no request can be authenticated.
+var ErrNoAuthMechanism = errors.New("auth: no authentication mechanism configured")
+
 func New() *Auth {
 	return &Auth{}
 }
@@ -74,6 +78,14 @@ func (ap *Provider) Provide(a app.App) error {
 	}
 	if ap.Opts.JwtSecret != "" {
 		jwtSecret = ap.Opts.JwtSecret
+	}
+
+	// Catch the misconfiguration at boot rather than letting every request
+	// fall through unauthenticated.
+	if sess == nil && jwtSecret == "" {
+		return fmt.Errorf(
+			"auth: sessions are disabled and no JWT secret is set, so no request could be authenticated; " +
+				"set JwtSecret (commonly from JWT_SECRET, falling back to APP_KEY) or leave sessions enabled")
 	}
 
 	auth := &Auth{
@@ -163,6 +175,14 @@ func (a *Auth) Protected(c app.Context) error {
 }
 
 func (a *Auth) Check(c app.Context) error {
+	// Refuse when there is no mechanism to authenticate against. Returning nil
+	// here would mean "authenticated", which made Protected admit anyone and
+	// Guest turn everyone away — an app configured with DisableSession and no
+	// JWT secret had a wide open protected area and an unreachable login page.
+	if a.sess == nil && len(a.jwtSecret) == 0 {
+		return ErrNoAuthMechanism
+	}
+
 	if a.sess != nil {
 		if user := a.sess.Get(c.RequestContext(), UserKey); user == nil {
 			return errors.New("user not found in session")
