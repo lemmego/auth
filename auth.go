@@ -109,6 +109,7 @@ func (ap *Provider) Provide(a app.App) error {
 		cookieHTTPOnly: true,
 		cookieSameSite: http.SameSiteLaxMode,
 		jwtExpiration:  24 * time.Hour,
+		jwtClaims:      ap.Opts.JwtClaims,
 	}
 
 	if ap.Opts.HomeRoute != "" {
@@ -194,35 +195,73 @@ func (a *Auth) Check(c app.Context) error {
 		return ErrNoAuthMechanism
 	}
 
-	if a.sess != nil {
-		if user := a.sess.Get(c.RequestContext(), UserKey); user == nil {
-			return errors.New("user not found in session")
-		} else {
-			c.Set(UserKey, user)
-		}
-	}
-
-	if string(a.jwtSecret) != "" {
-		jwtToken := ""
-		jwtCookie, err := c.Request().Cookie("jwt")
-		if err == nil {
-			jwtToken = strings.Replace(jwtCookie.Value, "jwt=", "", -1)
-		} else {
-			jwtToken = strings.Replace(c.Header("Authorization"), "bearer ", "", -1)
-		}
-		if jwtToken == "" {
-			return errors.New("jwt cookie not found")
-		}
-
-		authUser, err := a.jwtUser(jwtToken)
-		if err != nil {
-			return err
-		}
-		c.Set(UserKey, authUser)
+	// A user another middleware has already established is authenticated.
+	// This is what lets an external token verifier — an OAuth2 guard, a
+	// signed-header gateway, a test harness — run ahead of Protected without
+	// auth needing to know anything about it, and without the dependency
+	// pointing back the other way.
+	if existing := c.Get(UserKey); existing != nil {
 		return nil
 	}
 
-	return nil
+	// Each configured mechanism gets a turn, and only the failure of all of
+	// them is a failure to authenticate.
+	//
+	// This used to be two sequential ifs that both had to succeed. A session
+	// holding no user returned immediately, so with sessions enabled — the
+	// default — the bearer-token branch below was unreachable code. And a
+	// session that did hold a user fell through into the JWT branch, which
+	// then rejected the request for having no token. Configuring a JWT secret
+	// alongside sessions therefore broke session login outright.
+	var failures []error
+
+	if a.sess != nil {
+		if user := a.sess.Get(c.RequestContext(), UserKey); user != nil {
+			c.Set(UserKey, user)
+			return nil
+		}
+		failures = append(failures, errors.New("no user in session"))
+	}
+
+	if len(a.jwtSecret) > 0 {
+		token, err := a.tokenFromRequest(c)
+		if err != nil {
+			failures = append(failures, err)
+		} else if authUser, err := a.jwtUser(token); err != nil {
+			failures = append(failures, err)
+		} else {
+			c.Set(UserKey, authUser)
+			return nil
+		}
+	}
+
+	return errors.Join(failures...)
+}
+
+// tokenFromRequest reads the JWT from the jwt cookie, falling back to the
+// Authorization header.
+//
+// The header is parsed as a scheme and a token rather than by trimming a
+// literal prefix. The old code did strings.Replace(header, "bearer ", "", -1),
+// which missed the "Bearer " every standards-compliant client actually sends,
+// and removed the substring wherever else it appeared in the token.
+func (a *Auth) tokenFromRequest(c app.Context) (string, error) {
+	if cookie, err := c.Request().Cookie("jwt"); err == nil && cookie.Value != "" {
+		return cookie.Value, nil
+	}
+
+	header := strings.TrimSpace(c.Header("Authorization"))
+	if header == "" {
+		return "", errors.New("no jwt cookie and no Authorization header")
+	}
+	scheme, token, found := strings.Cut(header, " ")
+	if !found || !strings.EqualFold(scheme, "bearer") {
+		return "", errors.New("Authorization header is not a Bearer token")
+	}
+	if token = strings.TrimSpace(token); token == "" {
+		return "", errors.New("Bearer token is empty")
+	}
+	return token, nil
 }
 
 func (a *Auth) jwtUser(rawToken string) (map[string]any, error) {
