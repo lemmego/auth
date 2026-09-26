@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/alexedwards/scs/v2 v2.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/lemmego/api v0.1.32
+	github.com/lemmego/api v0.1.34
 	golang.org/x/crypto v0.48.0
 )
 
