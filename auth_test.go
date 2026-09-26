@@ -162,3 +162,27 @@ func TestCheckFailsClosedWithoutAnyMechanism(t *testing.T) {
 		t.Fatalf("expected ErrNoAuthMechanism, got %v", err)
 	}
 }
+
+// &auth.Provider{} is how anyone would first write it, and it used to
+// nil-dereference reading Opts.DisableSession.
+func TestProvideWithoutOptsDoesNotPanic(t *testing.T) {
+	provider := &Provider{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Provide() panicked on a nil Opts: %v", r)
+		}
+	}()
+
+	// Sessions are on by default, so this reaches app.Get for the session and
+	// fails there rather than on the nil Opts. Either outcome proves the nil
+	// guard ran; what matters is which panic we do not get.
+	func() {
+		defer func() { _ = recover() }()
+		_ = provider.Provide(nil)
+	}()
+
+	if provider.Opts == nil {
+		t.Error("Provide() left Opts nil")
+	}
+}

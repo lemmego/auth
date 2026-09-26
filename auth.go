@@ -72,6 +72,14 @@ func New() *Auth {
 
 func (ap *Provider) Provide(a app.App) error {
 	slog.Debug("Registering Auth")
+
+	// &auth.Provider{} is the obvious way to write it, and it used to
+	// nil-dereference on the next line. An unconfigured provider takes the
+	// defaults, which is sessions on and no JWT.
+	if ap.Opts == nil {
+		ap.Opts = &Opts{}
+	}
+
 	var sess *session.Session
 	var jwtSecret string
 	if !ap.Opts.DisableSession {
