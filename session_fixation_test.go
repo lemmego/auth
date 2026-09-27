@@ -55,15 +55,15 @@ func TestLoginRotatesTheSessionID(t *testing.T) {
 	}
 
 	user := testLoginUser(t)
-	if result := a.Login(fakeContext{ctx: ctx}, user, user.Email, "password"); result.Err != nil {
+	if result := a.Login(newFakeContext(ctx), user, user.Email, "password"); result.Err != nil {
 		t.Fatalf("login failed: %v", result.Err)
 	}
 
 	if after := a.sess.Token(ctx); after == fixated {
 		t.Fatal("the session id survived login, so session fixation is still possible")
 	}
-	if a.sess.Get(ctx, UserKey) == nil {
-		t.Fatal("login did not store the user in the session")
+	if a.sess.Get(ctx, UserIDKey) == nil {
+		t.Fatal("login did not store the identifier in the session")
 	}
 
 	// The rotation must carry existing data over. The CSRF middleware keeps
@@ -78,7 +78,7 @@ func TestLoginRotatesTheSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading the old id: %v", err)
 	}
-	if a.sess.Get(stale, UserKey) != nil {
+	if a.sess.Get(stale, UserIDKey) != nil {
 		t.Fatal("the pre-login session id is still authenticated")
 	}
 }
@@ -89,7 +89,7 @@ func TestLogoutDestroysTheSession(t *testing.T) {
 	a, ctx := newSessionAuth(t)
 
 	user := testLoginUser(t)
-	if result := a.Login(fakeContext{ctx: ctx}, user, user.Email, "password"); result.Err != nil {
+	if result := a.Login(newFakeContext(ctx), user, user.Email, "password"); result.Err != nil {
 		t.Fatalf("login failed: %v", result.Err)
 	}
 	a.sess.Put(ctx, "cart", "3 items")
@@ -97,7 +97,7 @@ func TestLogoutDestroysTheSession(t *testing.T) {
 
 	a.clearSession(ctx)
 
-	if a.sess.Get(ctx, UserKey) != nil {
+	if a.sess.Get(ctx, UserIDKey) != nil {
 		t.Fatal("the user survived logout")
 	}
 	if a.sess.GetString(ctx, "cart") != "" {
@@ -108,7 +108,7 @@ func TestLogoutDestroysTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading the old id: %v", err)
 	}
-	if a.sess.Get(stale, UserKey) != nil {
+	if a.sess.Get(stale, UserIDKey) != nil {
 		t.Fatal("the session id used before logout is still authenticated")
 	}
 }
@@ -119,7 +119,7 @@ func TestWritesAfterLogoutStartANewSession(t *testing.T) {
 	a, ctx := newSessionAuth(t)
 
 	user := testLoginUser(t)
-	if result := a.Login(fakeContext{ctx: ctx}, user, user.Email, "password"); result.Err != nil {
+	if result := a.Login(newFakeContext(ctx), user, user.Email, "password"); result.Err != nil {
 		t.Fatalf("login failed: %v", result.Err)
 	}
 	a.clearSession(ctx)
@@ -137,7 +137,7 @@ func TestWritesAfterLogoutStartANewSession(t *testing.T) {
 	if got := a.sess.GetString(fresh, "flash"); got != "You have been logged out." {
 		t.Fatalf("flash message did not survive logout: %q", got)
 	}
-	if a.sess.Get(fresh, UserKey) != nil {
+	if a.sess.Get(fresh, UserIDKey) != nil {
 		t.Fatal("the new session is authenticated")
 	}
 }
@@ -154,11 +154,11 @@ func TestLoginFailsWhenTheSessionCannotBeRotated(t *testing.T) {
 	a.sess.Store = failingStore{}
 
 	user := testLoginUser(t)
-	result := a.Login(fakeContext{ctx: ctx}, user, user.Email, "password")
+	result := a.Login(newFakeContext(ctx), user, user.Email, "password")
 	if result.Err == nil {
 		t.Fatal("expected login to fail when the session id cannot be rotated")
 	}
-	if a.sess.Get(ctx, UserKey) != nil {
+	if a.sess.Get(ctx, UserIDKey) != nil {
 		t.Fatal("a failed rotation still wrote the user into the session")
 	}
 }
@@ -179,12 +179,22 @@ func TestSessionlessAuthLogsInAndOut(t *testing.T) {
 // embedded, so a call to anything else fails loudly rather than silently.
 type fakeContext struct {
 	app.Context
-	ctx context.Context
+	ctx    context.Context
+	values map[string]any
 }
 
-func (f fakeContext) RequestContext() context.Context { return f.ctx }
+func newFakeContext(ctx context.Context) *fakeContext {
+	return &fakeContext{ctx: ctx, values: map[string]any{}}
+}
 
-func (f fakeContext) SetCookie(*http.Cookie) app.CookieGetSetter { return nil }
+func (f *fakeContext) RequestContext() context.Context { return f.ctx }
+
+// Login seeds the request memo, so the response never reads back the row it
+// just verified.
+func (f *fakeContext) Set(key string, value any) { f.values[key] = value }
+func (f *fakeContext) Get(key string) any        { return f.values[key] }
+
+func (f *fakeContext) SetCookie(*http.Cookie) app.CookieGetSetter { return nil }
 
 // failingStore rejects writes, standing in for a store that is down.
 type failingStore struct{}

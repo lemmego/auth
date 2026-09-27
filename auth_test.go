@@ -27,40 +27,60 @@ func TestLoginRequiresHashedPassword(t *testing.T) {
 	}
 }
 
-func TestJWTUserRejectsMalformedToken(t *testing.T) {
+func TestJWTSubjectRejectsMalformedToken(t *testing.T) {
 	a := &Auth{jwtSecret: []byte("secret")}
 
-	if _, err := a.jwtUser("not-a-jwt"); err == nil {
+	if _, err := a.jwtSubject("not-a-jwt"); err == nil {
 		t.Fatal("expected malformed token to fail")
 	}
 }
 
-func TestJWTUserRejectsExpiredToken(t *testing.T) {
+func TestJWTSubjectRejectsExpiredToken(t *testing.T) {
 	a := &Auth{jwtSecret: []byte("secret")}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user": "{\"id\":1}",
-		"exp":  time.Now().Add(-time.Minute).Unix(),
+		"sub": "1",
+		"exp": time.Now().Add(-time.Minute).Unix(),
 	})
 	rawToken, err := token.SignedString(a.jwtSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := a.jwtUser(rawToken); err == nil {
+	if _, err := a.jwtSubject(rawToken); err == nil {
 		t.Fatal("expected expired token to fail")
 	}
 }
 
-func TestJWTUserRejectsMissingUserClaim(t *testing.T) {
+// sub is the identity now. A token without one names nobody and cannot be
+// resolved, so it must be refused rather than treated as anonymous.
+func TestJWTSubjectRejectsAMissingSubject(t *testing.T) {
 	a := &Auth{jwtSecret: []byte("secret")}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": "1"})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "admin"})
 	rawToken, err := token.SignedString(a.jwtSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := a.jwtUser(rawToken); err == nil {
-		t.Fatal("expected missing user claim to fail")
+	if _, err := a.jwtSubject(rawToken); err == nil {
+		t.Fatal("expected a token with no sub claim to fail")
+	}
+}
+
+// A token signed with anything but the pinned algorithm must be refused. The
+// library rejects alg:none before the key function is reached.
+func TestJWTSubjectRejectsAlgNone(t *testing.T) {
+	a := &Auth{jwtSecret: []byte("secret")}
+	token := jwt.NewWithClaims(jwt.SigningMethodNone, jwt.MapClaims{
+		"sub": "1",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	rawToken, err := token.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.jwtSubject(rawToken); err == nil {
+		t.Fatal("a token with alg:none was accepted")
 	}
 }
 

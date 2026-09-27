@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/gob"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,13 +21,8 @@ var (
 	ErrUsernameMismatch    = errors.New("username mismatch")
 	ErrPasswordMismatch    = errors.New("password mismatch")
 	ErrJwtCouldNotBeSigned = errors.New("jwt could not be signed")
+	ErrMissingUserID       = errors.New("auth: the user has no identifier")
 )
-
-func init() {
-	gob.Register(&User{})
-}
-
-const UserKey = "user"
 
 type Opts struct {
 	DisableSession bool
@@ -37,6 +30,11 @@ type Opts struct {
 	JwtClaims      jwt.MapClaims
 	JwtExpiration  time.Duration
 	HomeRoute      string
+
+	// UserLoader turns the id a verified credential carries into the
+	// application's own user. Without it nothing can authenticate: see
+	// UserLoader's own documentation for the contract it must honour.
+	UserLoader UserLoader
 }
 
 type Provider struct {
@@ -45,6 +43,7 @@ type Provider struct {
 
 type Auth struct {
 	sess           *session.Session
+	userLoader     UserLoader
 	jwtSecret      []byte
 	jwtClaims      jwt.MapClaims
 	homeRoute      string
@@ -99,8 +98,26 @@ func (ap *Provider) Provide(a app.App) error {
 			"set JwtSecret (commonly from JWT_SECRET, falling back to APP_KEY) or leave sessions enabled")
 	}
 
+	// A credential now carries an id, so something has to turn that id back
+	// into a user. Without a loader nothing authenticates.
+	//
+	// Warned rather than refused for the same circularity as above: a hard
+	// error here would break `lemmego run appkey` on a project whose loader
+	// needs a database it has not configured yet. An application already in
+	// production, though, has a dead protected area, so say so louder there.
+	if ap.Opts.UserLoader == nil {
+		message := "auth: no UserLoader is configured, so no request can be authenticated; " +
+			"set Opts.UserLoader to a function that fetches your user by id"
+		if a.InProduction() {
+			slog.Error(message)
+		} else {
+			slog.Warn(message)
+		}
+	}
+
 	auth := &Auth{
 		sess:           sess,
+		userLoader:     ap.Opts.UserLoader,
 		jwtSecret:      []byte(jwtSecret),
 		homeRoute:      "/home",
 		cookiePath:     "/",
@@ -162,10 +179,6 @@ func Check(c app.Context) error {
 	return Get(c.App()).Check(c)
 }
 
-func AuthUser(c app.Context) any {
-	return c.Get(UserKey)
-}
-
 func (p *Provider) WithConfig(config *Opts) *Provider {
 	p.Opts = config
 	return p
@@ -181,11 +194,29 @@ func (a *Auth) Guest(c app.Context) error {
 
 func (a *Auth) Protected(c app.Context) error {
 	if err := a.Check(c); err != nil {
+		// A store that could not answer is a server fault, not a rejected
+		// credential. Flattening it into 401 would log everyone out over a
+		// blip and then stampede the login page when they all retry.
+		var storeDown *UserStoreUnavailableError
+		if errors.As(err, &storeDown) {
+			return err
+		}
+		// A misconfiguration is also not a rejected credential. 401 would
+		// send an operator hunting for a bad password.
+		if errors.Is(err, ErrNoUserLoader) || errors.Is(err, ErrNoAuthMechanism) {
+			return c.InternalServerError(err)
+		}
 		return c.Unauthorized(fmt.Errorf("unauthorized: %w", err))
 	}
 	return c.Next()
 }
 
+// Check resolves the request's identity.
+//
+// Both mechanisms converge on an identifier, and the identifier is turned into
+// a user by the application's loader. That convergence is the point: a handler
+// sees the same concrete type whether the request arrived with a session
+// cookie or a bearer token, because both ended in the same call.
 func (a *Auth) Check(c app.Context) error {
 	// Refuse when there is no mechanism to authenticate against. Returning nil
 	// here would mean "authenticated", which made Protected admit anyone and
@@ -200,25 +231,59 @@ func (a *Auth) Check(c app.Context) error {
 	// signed-header gateway, a test harness — run ahead of Protected without
 	// auth needing to know anything about it, and without the dependency
 	// pointing back the other way.
+	//
+	// It is also the per-request memo: the loader runs once even when
+	// Protected, a group guard and a handler all ask.
 	if existing := c.Get(UserKey); existing != nil {
 		return nil
 	}
+	// An identity with no user behind it — a client-credentials token.
+	if marked, _ := c.Get(authenticatedKey).(bool); marked {
+		return nil
+	}
+	// A failure is memoised too. Without this, three middlewares against a
+	// database with a thirty-second timeout is ninety seconds of a held
+	// connection on one dying request.
+	if failed, ok := c.Get(loadErrorKey).(error); ok && failed != nil {
+		return failed
+	}
 
-	// Each configured mechanism gets a turn, and only the failure of all of
-	// them is a failure to authenticate.
-	//
-	// This used to be two sequential ifs that both had to succeed. A session
-	// holding no user returned immediately, so with sessions enabled — the
-	// default — the bearer-token branch below was unreachable code. And a
-	// session that did hold a user fell through into the JWT branch, which
-	// then rejected the request for having no token. Configuring a JWT secret
-	// alongside sessions therefore broke session login outright.
+	id, ok := c.Get(UserIDKey).(string)
+	if !ok || id == "" {
+		resolved, err := a.subjectFromRequest(c)
+		if err != nil {
+			return err
+		}
+		id = resolved
+		// Set before loading, so anything that only needs an id — a consent
+		// screen, an audit line — works even when the load fails.
+		c.Set(UserIDKey, id)
+	}
+
+	user, err := a.loadUser(c, id)
+	if err != nil {
+		c.Set(loadErrorKey, err)
+		return err
+	}
+	c.Set(UserKey, user)
+	return nil
+}
+
+// subjectFromRequest takes an identifier from whichever credential the request
+// carries.
+//
+// Each configured mechanism gets a turn, and only the failure of all of them
+// is a failure. This used to be two sequential ifs that both had to succeed:
+// a session holding no user returned immediately, so with sessions enabled —
+// the default — the bearer-token branch was unreachable code; and a session
+// that did hold a user fell through into the JWT branch, which then rejected
+// the request for carrying no token.
+func (a *Auth) subjectFromRequest(c app.Context) (string, error) {
 	var failures []error
 
 	if a.sess != nil {
-		if user := a.sess.Get(c.RequestContext(), UserKey); user != nil {
-			c.Set(UserKey, user)
-			return nil
+		if id, ok := a.sess.GetAs[string](c.RequestContext(), UserIDKey); ok && id != "" {
+			return id, nil
 		}
 		failures = append(failures, errors.New("no user in session"))
 	}
@@ -227,24 +292,74 @@ func (a *Auth) Check(c app.Context) error {
 		token, err := a.tokenFromRequest(c)
 		if err != nil {
 			failures = append(failures, err)
-		} else if authUser, err := a.jwtUser(token); err != nil {
+		} else if subject, err := a.jwtSubject(token); err != nil {
 			failures = append(failures, err)
 		} else {
-			c.Set(UserKey, authUser)
-			return nil
+			return subject, nil
 		}
 	}
 
-	return errors.Join(failures...)
+	return "", errors.Join(failures...)
+}
+
+// loadUser calls the application's loader and normalises what comes back.
+func (a *Auth) loadUser(c app.Context, id string) (any, error) {
+	if a.userLoader == nil {
+		return nil, ErrNoUserLoader
+	}
+
+	user, err := a.userLoader(c, id)
+
+	switch {
+	case errors.Is(err, ErrUserNotFound):
+		return nil, a.revoke(c, err)
+
+	case err != nil:
+		// A cancelled request is the client hanging up, not the store
+		// failing. Reporting it as an outage buries the real ones.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("auth: loading the authenticated user: %w", err)
+		}
+		slog.Error("auth: the user store could not answer", "error", err, "user_id", id)
+		return nil, unavailable(err)
+
+	case isNilUser(user):
+		// A loader that reports "no rows" as (nil, nil), or hands back a typed
+		// nil pointer, must not authenticate anyone: a (*models.User)(nil) is
+		// not nil as an any, so it would satisfy both the short-circuit above
+		// and UserAs's assertion, and the first handler to read a field would
+		// dereference nil.
+		return nil, a.revoke(c, ErrUserNotFound)
+	}
+
+	return user, nil
+}
+
+// revoke destroys the credential behind an identity that no longer exists, so
+// the next request is anonymous rather than another futile lookup of a dead id
+// on every request until the session or token expires.
+func (a *Auth) revoke(c app.Context, cause error) error {
+	a.clearSession(c.RequestContext())
+	c.SetCookie(&http.Cookie{
+		Name:     "jwt",
+		Value:    "",
+		Path:     a.cookiePath,
+		Domain:   a.cookieDomain,
+		Secure:   a.cookieSecure,
+		HttpOnly: a.cookieHTTPOnly,
+		SameSite: a.cookieSameSite,
+		MaxAge:   -1,
+	})
+	return cause
 }
 
 // tokenFromRequest reads the JWT from the jwt cookie, falling back to the
 // Authorization header.
 //
 // The header is parsed as a scheme and a token rather than by trimming a
-// literal prefix. The old code did strings.Replace(header, "bearer ", "", -1),
-// which missed the "Bearer " every standards-compliant client actually sends,
-// and removed the substring wherever else it appeared in the token.
+// literal prefix: the old form missed the capitalised "Bearer " that every
+// standards-compliant client sends, and removed the substring wherever else
+// it appeared.
 func (a *Auth) tokenFromRequest(c app.Context) (string, error) {
 	if cookie, err := c.Request().Cookie("jwt"); err == nil && cookie.Value != "" {
 		return cookie.Value, nil
@@ -264,35 +379,32 @@ func (a *Auth) tokenFromRequest(c app.Context) (string, error) {
 	return token, nil
 }
 
-func (a *Auth) jwtUser(rawToken string) (map[string]any, error) {
-	token, err := jwt.Parse(rawToken, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-
-		return a.jwtSecret, nil
-	})
+// jwtSubject verifies the token and returns its sub claim.
+//
+// The token carries nothing else about the user. It is signed, not encrypted,
+// so anything embedded in it is readable by whoever holds it — which, before
+// this, meant every field of the user row that was not tagged json:"-", and
+// a stale copy of them at that.
+func (a *Auth) jwtSubject(rawToken string) (string, error) {
+	token, err := jwt.Parse(rawToken,
+		func(*jwt.Token) (any, error) { return a.jwtSecret, nil },
+		// Pin the algorithm through the library rather than checking inside
+		// the key function: this rejects alg:none before the key is reached
+		// at all.
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+	)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if !token.Valid {
-		return nil, errors.New("invalid jwt")
+		return "", errors.New("invalid jwt")
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, errors.New("invalid jwt claims")
+	subject, err := token.Claims.GetSubject()
+	if err != nil || subject == "" {
+		return "", errors.New("jwt has no sub claim")
 	}
-	encodedUser, ok := claims["user"].(string)
-	if !ok || encodedUser == "" {
-		return nil, errors.New("invalid jwt user claim")
-	}
-
-	var authUser map[string]any
-	if err := json.Unmarshal([]byte(encodedUser), &authUser); err != nil {
-		return nil, err
-	}
-	return authUser, nil
+	return subject, nil
 }
 
 func (a *Auth) Login(c app.Context, userProvider UserProvider, username, password string) *LoginResult {
@@ -307,31 +419,35 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 		return loginResult
 	}
 
-	var token *jwt.Token
-	userSubEncoded, err := json.Marshal(userProvider)
-	if err != nil {
-		loginResult.Err = err
+	// sub is the identity now, not decoration: it is the id the loader is
+	// handed on every subsequent request. An empty one would mint a
+	// credential whose very next request fails, so fail the login instead of
+	// succeeding into a broken session.
+	id := userProvider.GetID()
+	if id == "" {
+		loginResult.Err = ErrMissingUserID
 		return loginResult
 	}
 
-	defaultClaims := jwt.MapClaims{
-		"user": string(userSubEncoded),
-		"sub":  userProvider.GetID() + "|" + userProvider.GetUsername(),
-	}
+	var token *jwt.Token
 
 	if string(a.jwtSecret) != "" {
-		claims := make(jwt.MapClaims, len(defaultClaims)+len(a.jwtClaims)+2)
-		if a.jwtClaims != nil {
-			for key, value := range a.jwtClaims {
-				claims[key] = value
-			}
+		claims := make(jwt.MapClaims, len(a.jwtClaims)+3)
+		for key, value := range a.jwtClaims {
+			claims[key] = value
 		}
-		for key, value := range defaultClaims {
-			if _, exists := claims[key]; !exists {
-				claims[key] = value
-			}
+
+		// sub, iat and exp are applied last and unconditionally.
+		//
+		// The old loop applied them only when absent, so a configured
+		// Opts.JwtClaims{"sub": …} overrode the real subject. That was
+		// harmless while sub was decorative. It is privilege escalation now
+		// that sub is what the loader looks up, so the precedence inverts.
+		if _, taken := claims["sub"]; taken {
+			slog.Warn("auth: Opts.JwtClaims sets sub, which identifies the user; it is being ignored")
 		}
 		now := time.Now()
+		claims["sub"] = id
 		claims["iat"] = now.Unix()
 		claims["exp"] = now.Add(a.jwtExpirationOrDefault()).Unix()
 		token = jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -360,7 +476,18 @@ func (a *Auth) Login(c app.Context, userProvider UserProvider, username, passwor
 			loginResult.Err = err
 			return loginResult
 		}
-		a.sess.Put(c.RequestContext(), UserKey, userProvider)
+		// An identifier, not the object. Storing the object kept the type
+		// across a restart but also wrote every exported field into the
+		// session store — and gob ignores json:"-", so that included the
+		// bcrypt hash.
+		a.sess.Put(c.RequestContext(), UserIDKey, id)
+	}
+
+	// Seed the request memo, so the response handler renders the user it just
+	// verified instead of reading the row straight back.
+	if c != nil {
+		c.Set(UserIDKey, id)
+		c.Set(UserKey, userProvider)
 	}
 
 	if loginResult.JwtToken != "" && c != nil {
@@ -407,7 +534,7 @@ func (a *Auth) clearSession(ctx context.Context) {
 	// the user would stay logged in. Remove the identity and rotate the id
 	// explicitly rather than report a logout that did not happen.
 	slog.Error("auth: could not destroy the session on logout", "error", err)
-	a.sess.Pop(ctx, UserKey)
+	a.sess.Pop(ctx, UserIDKey)
 	if err := a.sess.RenewToken(ctx); err != nil {
 		slog.Error("auth: could not rotate the session id on logout", "error", err)
 	}

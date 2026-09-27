@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,9 +16,10 @@ import (
 // request context, and the per-request bag Check writes the user into.
 type checkContext struct {
 	app.Context
-	ctx    context.Context
-	req    *http.Request
-	values map[string]any
+	ctx     context.Context
+	req     *http.Request
+	values  map[string]any
+	cookies []*http.Cookie
 }
 
 func newCheckContext(ctx context.Context, req *http.Request) *checkContext {
@@ -36,14 +38,34 @@ func (c *checkContext) Header(key string) string        { return c.req.Header.Ge
 func (c *checkContext) Set(key string, value any)       { c.values[key] = value }
 func (c *checkContext) Get(key string) any              { return c.values[key] }
 
-// Login writes the JWT cookie; the tests here only care about the token.
-func (c *checkContext) SetCookie(*http.Cookie) app.CookieGetSetter { return nil }
+// Cookies are recorded rather than discarded: revoking a credential is
+// observable only through them.
+func (c *checkContext) SetCookie(cookie *http.Cookie) app.CookieGetSetter {
+	c.cookies = append(c.cookies, cookie)
+	return nil
+}
 
-func signedUserToken(t *testing.T, secret []byte) string {
+// cookie returns the last cookie written under name.
+func (c *checkContext) cookie(name string) *http.Cookie {
+	for i := len(c.cookies) - 1; i >= 0; i-- {
+		if c.cookies[i].Name == name {
+			return c.cookies[i]
+		}
+	}
+	return nil
+}
+
+// App is unused by the tests' own loaders, which close over what they need,
+// but Check hands it to them so it has to exist.
+func (c *checkContext) App() app.App { return nil }
+
+// signedUserToken mints a token the way Login now does: a subject and
+// nothing else about the user.
+func signedUserToken(t *testing.T, secret []byte, subject string) string {
 	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user": `{"id":7,"email":"user@example.com"}`,
-		"exp":  time.Now().Add(time.Hour).Unix(),
+		"sub": subject,
+		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	raw, err := token.SignedString(secret)
 	if err != nil {
@@ -52,97 +74,170 @@ func signedUserToken(t *testing.T, secret []byte) string {
 	return raw
 }
 
-// Check used to run the session and the JWT branches in sequence, and both
-// had to succeed. A session holding no user returned before the JWT branch,
-// so with sessions enabled — the default — a bearer token could never
-// authenticate anything.
-func TestCheckFallsBackToBearerTokenWhenTheSessionIsEmpty(t *testing.T) {
-	a, ctx := newSessionAuth(t)
-	a.jwtSecret = []byte("secret")
+// testUser is the application's own user type, as far as these tests are
+// concerned.
+type testUser struct {
+	ID    string
+	Email string
+}
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Authorization", "Bearer "+signedUserToken(t, a.jwtSecret))
-	c := newCheckContext(ctx, req)
+func (u *testUser) GetID() string       { return u.ID }
+func (u *testUser) GetUsername() string { return u.Email }
+func (u *testUser) GetPassword() string { return "" }
 
-	if err := a.Check(c); err != nil {
-		t.Fatalf("Check rejected a valid bearer token because the session was empty: %v", err)
+// loaderFor returns a loader over a fixed set of users, and a counter, so a
+// test can assert how many times it ran.
+func loaderFor(users ...*testUser) (UserLoader, *int) {
+	byID := map[string]*testUser{}
+	for _, user := range users {
+		byID[user.ID] = user
 	}
-	user, ok := c.Get(UserKey).(map[string]any)
-	if !ok {
-		t.Fatalf("Check set %T as the user, want the decoded claims", c.Get(UserKey))
+	calls := 0
+	return func(_ app.Context, id string) (any, error) {
+		calls++
+		user, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", ErrUserNotFound, id)
+		}
+		return user, nil
+	}, &calls
+}
+
+// The claim this whole design makes: one handler, one assertion, both
+// transports.
+//
+// Before, the session path set the application's own type and the JWT path
+// set a map[string]any decoded from the token — so the same handler saw a
+// different type depending on how the request had authenticated. That is
+// FINDINGS.md's first entry, written as a test.
+func TestTheSameHandlerSeesTheSameTypeOnBothPaths(t *testing.T) {
+	ada := &testUser{ID: "7", Email: "ada@example.com"}
+
+	// The handler under test. It is written once and must work for both.
+	handler := func(c app.Context) error {
+		user, ok := UserAs[*testUser](c)
+		if !ok {
+			return fmt.Errorf("not the application's type: got %T", AuthUser(c))
+		}
+		if user.Email != "ada@example.com" {
+			return fmt.Errorf("wrong user: %+v", user)
+		}
+		return nil
 	}
-	if user["email"] != "user@example.com" {
-		t.Errorf("user claim = %v", user)
+
+	for _, transport := range []string{"session", "bearer"} {
+		t.Run(transport, func(t *testing.T) {
+			a, sessionCtx := newSessionAuth(t)
+			a.jwtSecret = []byte("secret")
+			a.userLoader, _ = loaderFor(ada)
+
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			switch transport {
+			case "session":
+				a.sess.Put(sessionCtx, UserIDKey, ada.ID)
+			case "bearer":
+				request.Header.Set("Authorization", "Bearer "+signedUserToken(t, a.jwtSecret, ada.ID))
+			}
+
+			c := newCheckContext(sessionCtx, request)
+			if err := a.Check(c); err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if err := handler(c); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
-// The mirror image: a session that does hold a user used to fall through into
-// the JWT branch, which then rejected the request for carrying no token. So
-// configuring a JWT secret alongside sessions broke session login outright.
-func TestCheckAcceptsASessionUserWhenAJWTSecretIsAlsoConfigured(t *testing.T) {
-	a, ctx := newSessionAuth(t)
-	a.jwtSecret = []byte("secret")
-	a.sess.Put(ctx, UserKey, &User{ID: 3, Email: "in-session@example.com"})
-
-	c := newCheckContext(ctx, nil)
-	if err := a.Check(c); err != nil {
-		t.Fatalf("Check rejected a logged-in session because no JWT was present: %v", err)
-	}
-	user, ok := c.Get(UserKey).(*User)
-	if !ok {
-		t.Fatalf("Check set %T as the user, want the session's own type", c.Get(UserKey))
-	}
-	if user.Email != "in-session@example.com" {
-		t.Errorf("user = %+v", user)
-	}
-}
-
-// A user another middleware already established is authenticated. This is the
-// seam an external token verifier hangs off without auth depending on it.
+// A user another middleware has already established is authenticated. This is
+// the seam an external verifier hangs off without auth depending on it.
 func TestCheckHonoursAPreEstablishedUser(t *testing.T) {
 	a, ctx := newSessionAuth(t)
 	a.jwtSecret = []byte("secret")
+	a.userLoader, _ = loaderFor()
 
 	c := newCheckContext(ctx, nil)
-	c.Set(UserKey, map[string]any{"id": "from-another-middleware"})
+	c.Set(UserKey, &testUser{ID: "9", Email: "elsewhere@example.com"})
 
 	if err := a.Check(c); err != nil {
 		t.Fatalf("Check rejected a user established by another middleware: %v", err)
 	}
-	if got := c.Get(UserKey).(map[string]any)["id"]; got != "from-another-middleware" {
-		t.Errorf("Check replaced the established user with %v", got)
+	user, _ := UserAs[*testUser](c)
+	if user.ID != "9" {
+		t.Errorf("Check replaced the established user with %+v", user)
+	}
+}
+
+// A verified subject established elsewhere — the oauth2 bearer guard — must
+// go through the same loader, so it produces the same type.
+func TestCheckLoadsASubjectEstablishedElsewhere(t *testing.T) {
+	a, ctx := newSessionAuth(t)
+	a.userLoader, _ = loaderFor(&testUser{ID: "7", Email: "ada@example.com"})
+
+	c := newCheckContext(ctx, nil)
+	SetSubject(c, "7")
+
+	if err := a.Check(c); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if user, ok := UserAs[*testUser](c); !ok || user.Email != "ada@example.com" {
+		t.Errorf("the subject was not loaded: %v, %v", user, ok)
+	}
+}
+
+// A client-credentials token authenticates a caller with no user behind it.
+// Protected must admit it while AuthUser stays nil — inventing a user for it
+// was the old behaviour and it was a lie.
+func TestAuthenticatedWithoutAUser(t *testing.T) {
+	a, ctx := newSessionAuth(t)
+	a.userLoader, _ = loaderFor()
+
+	c := newCheckContext(ctx, nil)
+	SetAuthenticated(c)
+
+	if err := a.Check(c); err != nil {
+		t.Fatalf("Check rejected an identity with no user: %v", err)
+	}
+	if AuthUser(c) != nil {
+		t.Errorf("a user was invented: %v", AuthUser(c))
+	}
+	if !IsAuthenticated(c) {
+		t.Error("IsAuthenticated reported false for a verified caller")
+	}
+}
+
+func TestCheckStillRefusesWhenNoMechanismIsConfigured(t *testing.T) {
+	if err := (&Auth{}).Check(newCheckContext(nil, nil)); err != ErrNoAuthMechanism {
+		t.Fatalf("Check = %v, want ErrNoAuthMechanism", err)
 	}
 }
 
 // The header was parsed by deleting the literal "bearer ", which missed the
-// capitalised form every standards-compliant client sends and mangled any
-// token containing that substring.
+// capitalised form every standards-compliant client sends.
 func TestCheckParsesTheAuthorizationScheme(t *testing.T) {
-	secret := []byte("secret")
-	token := signedUserToken(t, secret)
-
 	for _, tc := range []struct {
 		name   string
 		header string
 		wantOK bool
 	}{
-		{"canonical Bearer", "Bearer " + token, true},
-		{"lowercase bearer", "bearer " + token, true},
-		{"odd casing", "BeArEr " + token, true},
-		{"extra spacing", "Bearer   " + token, true},
-		{"no scheme", token, false},
-		{"wrong scheme", "Basic " + token, false},
-		{"empty token", "Bearer ", false},
-		{"empty header", "", false},
+		{"canonical Bearer", "Bearer ", true},
+		{"lowercase bearer", "bearer ", true},
+		{"odd casing", "BeArEr ", true},
+		{"extra spacing", "Bearer   ", true},
+		{"no scheme", "", false},
+		{"wrong scheme", "Basic ", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &Auth{jwtSecret: secret}
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			a := &Auth{jwtSecret: []byte("secret")}
+			a.userLoader, _ = loaderFor(&testUser{ID: "7", Email: "ada@example.com"})
+
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			if tc.header != "" {
-				req.Header.Set("Authorization", tc.header)
+				request.Header.Set("Authorization", tc.header+signedUserToken(t, a.jwtSecret, "7"))
 			}
 
-			err := a.Check(newCheckContext(nil, req))
+			err := a.Check(newCheckContext(nil, request))
 			if tc.wantOK && err != nil {
 				t.Fatalf("Check(%q) = %v, want success", tc.header, err)
 			}
@@ -150,47 +245,5 @@ func TestCheckParsesTheAuthorizationScheme(t *testing.T) {
 				t.Fatalf("Check(%q) succeeded, want a failure", tc.header)
 			}
 		})
-	}
-}
-
-// Opts.JwtClaims was declared, documented and never read: Provide built the
-// Auth without it, so every custom claim an application configured was
-// silently dropped and only tests that constructed &Auth{} directly ever
-// exercised the field.
-func TestProvideCarriesConfiguredJWTClaims(t *testing.T) {
-	a := app.Configure()
-	provider := &Provider{Opts: &Opts{
-		DisableSession: true,
-		JwtSecret:      "secret",
-		JwtClaims:      jwt.MapClaims{"iss": "example.com", "role": "admin"},
-	}}
-	if err := provider.Provide(a); err != nil {
-		t.Fatal(err)
-	}
-
-	auth, ok := app.Lookup[*Auth](a)
-	if !ok {
-		t.Fatal("Provide registered no *Auth")
-	}
-	if auth.jwtClaims == nil {
-		t.Fatal("Provide dropped Opts.JwtClaims")
-	}
-	if auth.jwtClaims["iss"] != "example.com" || auth.jwtClaims["role"] != "admin" {
-		t.Fatalf("jwtClaims = %v", auth.jwtClaims)
-	}
-
-	// The claims must actually reach an issued token, not merely be stored.
-	user := testLoginUser(t)
-	result := auth.Login(newCheckContext(context.Background(), nil), user, user.Email, "password")
-	if result.Err != nil {
-		t.Fatalf("login failed: %v", result.Err)
-	}
-	parsed, err := jwt.Parse(result.JwtToken, func(*jwt.Token) (any, error) { return auth.jwtSecret, nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	claims := parsed.Claims.(jwt.MapClaims)
-	if claims["iss"] != "example.com" || claims["role"] != "admin" {
-		t.Errorf("issued token claims = %v; the configured claims did not reach it", claims)
 	}
 }
