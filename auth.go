@@ -175,6 +175,13 @@ func Login(c app.Context, provider UserProvider, username, password string) *Log
 	return Get(c.App()).Login(c, provider, username, password)
 }
 
+// LoginAs establishes a session and token for a user whose identity was
+// verified some other way — a social callback, a magic link, an SSO
+// assertion, an impersonation. See Auth.LoginAs.
+func LoginAs(c app.Context, provider UserProvider) *LoginResult {
+	return Get(c.App()).LoginAs(c, provider)
+}
+
 func Check(c app.Context) error {
 	return Get(c.App()).Check(c)
 }
@@ -407,15 +414,44 @@ func (a *Auth) jwtSubject(rawToken string) (string, error) {
 	return subject, nil
 }
 
+// Login verifies a password and establishes the session and token.
+//
+// The caller has already fetched the row, because checking the password needs
+// it. Login confirms the username matches, compares the hash, and hands off to
+// LoginAs.
 func (a *Auth) Login(c app.Context, userProvider UserProvider, username, password string) *LoginResult {
-	loginResult := &LoginResult{}
 	if userProvider == nil || userProvider.GetUsername() != username {
-		loginResult.Err = ErrUsernameMismatch
-		return loginResult
+		return &LoginResult{Err: ErrUsernameMismatch}
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(userProvider.GetPassword()), []byte(password)); err != nil {
-		loginResult.Err = ErrPasswordMismatch
+		return &LoginResult{Err: ErrPasswordMismatch}
+	}
+
+	return a.LoginAs(c, userProvider)
+}
+
+// LoginAs establishes the session and token for a user whose identity has
+// already been established some other way — without comparing a password.
+//
+// This is what a credential that is not a password needs: an OAuth2 callback
+// from GitHub or Google, a magic link, an SSO assertion, an invitation
+// accepted by token, or an administrator impersonating a user to reproduce a
+// bug. None of those have a password to compare, and UserProvider requires
+// GetPassword, so before this existed such an account could not be logged in
+// through the supported path at all.
+//
+// It does everything Login does after the password check: rotates the session
+// id against fixation, writes the subject into the session, mints the JWT and
+// sets the cookie.
+//
+// The caller is responsible for having verified the identity. LoginAs will
+// authenticate whoever it is handed, which is exactly why it is named for what
+// it does.
+func (a *Auth) LoginAs(c app.Context, userProvider UserProvider) *LoginResult {
+	loginResult := &LoginResult{}
+	if userProvider == nil {
+		loginResult.Err = ErrUserNotFound
 		return loginResult
 	}
 
