@@ -35,6 +35,27 @@ type Opts struct {
 	// application's own user. Without it nothing can authenticate: see
 	// UserLoader's own documentation for the contract it must honour.
 	UserLoader UserLoader
+
+	// SocialProviders are the identity providers to offer, such as
+	// auth/social/github. Empty means no social sign-in, and the routes are
+	// not mounted.
+	SocialProviders []SocialProvider
+
+	// SocialStore is how this package reaches the application's users during
+	// a social sign-in. Required when SocialProviders is not empty.
+	SocialStore SocialStore
+
+	// LinkPolicy decides what happens when a provider returns an email that
+	// already has an account. The zero value is LinkVerifiedOnly, which is
+	// the only one of the three that is safe on its own.
+	LinkPolicy LinkPolicy
+
+	// AppURL is where this application is reachable, used to build a
+	// provider's redirect URI. Required when SocialProviders is not empty,
+	// because the redirect URI has to match what was registered with the
+	// provider exactly — deriving it from the request's Host would mean a
+	// proxy that rewrites Host silently breaks every sign-in.
+	AppURL string
 }
 
 type Provider struct {
@@ -53,6 +74,14 @@ type Auth struct {
 	cookieHTTPOnly bool
 	cookieSameSite http.SameSite
 	jwtExpiration  time.Duration
+
+	// Social sign-in. Empty unless Opts named a store and some providers,
+	// which is what keeps a project that does not want it from paying for
+	// anything beyond three nil fields.
+	socialProviders map[string]SocialProvider
+	socialStore     SocialStore
+	linkPolicy      LinkPolicy
+	appURL          string
 }
 
 type LoginResult struct {
@@ -150,7 +179,55 @@ func (ap *Provider) Provide(a app.App) error {
 		}
 	}
 
+	if err := auth.wireSocial(ap.Opts); err != nil {
+		return err
+	}
+
 	a.AddService(auth)
+	return nil
+}
+
+// wireSocial installs the social drivers, refusing a half-configured set.
+//
+// Refused rather than defaulted, because every half of this is load-bearing:
+// a provider with no store cannot resolve anybody, and an AppURL the
+// application did not state would have to be guessed from a request's Host —
+// which a proxy rewrites, so every sign-in would break in production and
+// work locally.
+func (a *Auth) wireSocial(opts *Opts) error {
+	if len(opts.SocialProviders) == 0 {
+		return nil
+	}
+	if opts.SocialStore == nil {
+		return fmt.Errorf("auth: %d social providers are configured but no "+
+			"SocialStore, so nothing could resolve who is signing in",
+			len(opts.SocialProviders))
+	}
+	if opts.AppURL == "" {
+		return errors.New("auth: social providers need AppURL, because a " +
+			"provider's redirect URI must match what was registered with it " +
+			"exactly and cannot be derived from a request a proxy may have " +
+			"rewritten")
+	}
+
+	a.socialProviders = make(map[string]SocialProvider, len(opts.SocialProviders))
+	for _, provider := range opts.SocialProviders {
+		if provider == nil {
+			return errors.New("auth: a nil social provider was configured")
+		}
+		name := provider.Name()
+		if name == "" {
+			return fmt.Errorf("auth: social provider %T has no name", provider)
+		}
+		if existing, taken := a.socialProviders[name]; taken {
+			return fmt.Errorf("auth: two social providers claim the name %q: "+
+				"%T and %T", name, existing, provider)
+		}
+		a.socialProviders[name] = provider
+	}
+	a.socialStore = opts.SocialStore
+	a.linkPolicy = opts.LinkPolicy
+	a.appURL = opts.AppURL
 	return nil
 }
 
