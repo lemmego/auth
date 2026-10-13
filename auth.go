@@ -41,9 +41,15 @@ type Opts struct {
 	// not mounted.
 	SocialProviders []SocialProvider
 
-	// SocialStore is how this package reaches the application's users during
-	// a social sign-in. Required when SocialProviders is not empty.
-	SocialStore SocialStore
+	// SocialStore resolves the store this package reaches the application's
+	// users through. Required when SocialProviders is not empty.
+	//
+	// A function rather than a value, for the same reason UserLoader takes an
+	// app.Context: LoadProviders runs before the container exists, so a store
+	// that needs the database connection cannot be built at the point the
+	// options are written. This is called once, during Provide, which is the
+	// first moment the container can answer.
+	SocialStore func(a app.App) SocialStore
 
 	// LinkPolicy decides what happens when a provider returns an email that
 	// already has an account. The zero value is LinkVerifiedOnly, which is
@@ -179,7 +185,7 @@ func (ap *Provider) Provide(a app.App) error {
 		}
 	}
 
-	if err := auth.wireSocial(ap.Opts); err != nil {
+	if err := auth.wireSocial(a, ap.Opts); err != nil {
 		return err
 	}
 
@@ -194,7 +200,7 @@ func (ap *Provider) Provide(a app.App) error {
 // application did not state would have to be guessed from a request's Host —
 // which a proxy rewrites, so every sign-in would break in production and
 // work locally.
-func (a *Auth) wireSocial(opts *Opts) error {
+func (a *Auth) wireSocial(app_ app.App, opts *Opts) error {
 	if len(opts.SocialProviders) == 0 {
 		return nil
 	}
@@ -225,7 +231,12 @@ func (a *Auth) wireSocial(opts *Opts) error {
 		}
 		a.socialProviders[name] = provider
 	}
-	a.socialStore = opts.SocialStore
+	store := opts.SocialStore(app_)
+	if store == nil {
+		return errors.New("auth: SocialStore returned nothing, so nothing " +
+			"could resolve who is signing in")
+	}
+	a.socialStore = store
 	a.linkPolicy = opts.LinkPolicy
 	a.appURL = opts.AppURL
 	return nil

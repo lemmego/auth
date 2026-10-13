@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+
 	"errors"
+	"github.com/lemmego/api/app"
 	"strings"
 	"testing"
 )
@@ -416,7 +418,7 @@ func TestAnUnknownProviderIsRefused(t *testing.T) {
 
 func TestProvidersWithoutAStoreAreRefusedAtBoot(t *testing.T) {
 	a := New()
-	err := a.wireSocial(&Opts{
+	err := a.wireSocial(nil, &Opts{
 		SocialProviders: []SocialProvider{&fakeProvider{name: "github"}},
 		AppURL:          "https://productshore.test",
 	})
@@ -431,9 +433,9 @@ func TestProvidersWithoutAStoreAreRefusedAtBoot(t *testing.T) {
 
 func TestProvidersWithoutAnAppURLAreRefusedAtBoot(t *testing.T) {
 	a := New()
-	err := a.wireSocial(&Opts{
+	err := a.wireSocial(nil, &Opts{
 		SocialProviders: []SocialProvider{&fakeProvider{name: "github"}},
-		SocialStore:     newFakeStore(),
+		SocialStore:     func(app.App) SocialStore { return newFakeStore() },
 	})
 	if err == nil {
 		t.Fatal("a provider with no AppURL was accepted")
@@ -445,12 +447,12 @@ func TestProvidersWithoutAnAppURLAreRefusedAtBoot(t *testing.T) {
 
 func TestTwoProvidersWithOneNameAreRefused(t *testing.T) {
 	a := New()
-	err := a.wireSocial(&Opts{
+	err := a.wireSocial(nil, &Opts{
 		SocialProviders: []SocialProvider{
 			&fakeProvider{name: "github"},
 			&fakeProvider{name: "github"},
 		},
-		SocialStore: newFakeStore(),
+		SocialStore: func(app.App) SocialStore { return newFakeStore() },
 		AppURL:      "https://productshore.test",
 	})
 	if err == nil {
@@ -461,7 +463,7 @@ func TestTwoProvidersWithOneNameAreRefused(t *testing.T) {
 
 func TestNoProvidersIsNotAnError(t *testing.T) {
 	a := New()
-	if err := a.wireSocial(&Opts{}); err != nil {
+	if err := a.wireSocial(nil, &Opts{}); err != nil {
 		t.Fatalf("an application with no social sign-in failed to boot: %v", err)
 	}
 	if len(a.SocialProviders()) != 0 {
@@ -482,5 +484,47 @@ func TestSocialSignInNeedsASession(t *testing.T) {
 	if _, err := a.StartSocial(c, "github"); err == nil ||
 		!strings.Contains(err.Error(), "session") {
 		t.Fatalf("got %v, want a refusal naming the session", err)
+	}
+}
+
+// The store is resolved from the container, not written down in the options,
+// because LoadProviders runs before the container exists — the same reason
+// UserLoader takes an app.Context. This asserts the factory is actually
+// called rather than the field merely being accepted.
+func TestTheSocialStoreIsResolvedFromTheContainer(t *testing.T) {
+	a := New()
+	called := 0
+	store := newFakeStore()
+
+	err := a.wireSocial(nil, &Opts{
+		SocialProviders: []SocialProvider{&fakeProvider{name: "github"}},
+		SocialStore: func(app.App) SocialStore {
+			called++
+			return store
+		},
+		AppURL: "https://productshore.test",
+	})
+	if err != nil {
+		t.Fatalf("wireSocial: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("the factory was called %d times, want once at boot", called)
+	}
+	if a.socialStore != store {
+		t.Fatal("the resolved store was not the one installed")
+	}
+}
+
+// A factory that resolves nothing is a misconfiguration, and it must fail the
+// boot rather than produce an Auth whose every social callback panics.
+func TestAStoreFactoryThatReturnsNothingIsRefused(t *testing.T) {
+	a := New()
+	err := a.wireSocial(nil, &Opts{
+		SocialProviders: []SocialProvider{&fakeProvider{name: "github"}},
+		SocialStore:     func(app.App) SocialStore { return nil },
+		AppURL:          "https://productshore.test",
+	})
+	if err == nil {
+		t.Fatal("a factory returning nothing was accepted")
 	}
 }
