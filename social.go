@@ -148,6 +148,9 @@ var (
 
 	// ErrNoSocialStore means Opts.SocialStore was not set.
 	ErrNoSocialStore = errors.New("auth: no social store is configured")
+
+	// ErrUnauthenticated means a link was attempted with nobody signed in.
+	ErrUnauthenticated = errors.New("auth: nobody is signed in")
 )
 
 // SocialStore is how this package reaches the application's users.
@@ -392,4 +395,70 @@ func redirectURIFor(base, name string) (string, error) {
 // subtleCompare is crypto/subtle's comparison, on strings.
 func subtleCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// LinkSocial attaches an identity to somebody who is already signed in.
+//
+// The other half of the link policy, and the reason ErrLinkRefused's message
+// can tell people to sign in and link it from their settings: without this
+// the refusal would be an instruction nobody could follow.
+//
+// It signs nobody in and returns no credential. Proving control of a GitHub
+// account says who you are at GitHub; the session already says who you are
+// here, and the only thing this changes is that the two are connected. A
+// method that also logged somebody in would be a second way into an account,
+// reachable by anybody who could get a callback delivered.
+func (a *Auth) LinkSocial(c app.Context, name, code, state, userID string) error {
+	provider, ok := a.SocialProvider(name)
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrNoSocialProvider, name)
+	}
+	if a.socialStore == nil {
+		return ErrNoSocialStore
+	}
+	if a.sess == nil {
+		return errors.New("auth: linking an identity needs a session")
+	}
+	if userID == "" {
+		return ErrUnauthenticated
+	}
+
+	// The same state mechanism as a sign-in, popped first so a replay finds
+	// nothing. A link is as worth forging as a sign-in: a callback delivered
+	// to a signed-in victim would attach the attacker's provider account to
+	// the victim's, which is a permanent back door into it.
+	expected, _ := a.sess.PopAs[string](c.RequestContext(), socialStateKey)
+	if expected == "" || !matchesSocialState(expected, name, state) {
+		return ErrStateMismatch
+	}
+
+	redirectURI, err := redirectURIFor(a.appURL, name)
+	if err != nil {
+		return err
+	}
+
+	ctx := c.RequestContext()
+	identity, err := provider.Identity(ctx, code, redirectURI)
+	if err != nil {
+		return err
+	}
+	if identity == nil {
+		return errors.New("auth: the provider returned no identity")
+	}
+	identity.Provider = provider.Name()
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	identity.Email = strings.ToLower(strings.TrimSpace(identity.Email))
+
+	// Refused when the identity already belongs to somebody else, which the
+	// store reports. Attaching it here would move their sign-in onto this
+	// account.
+	return a.socialStore.LinkSocialIdentity(ctx, userID, *identity)
+}
+
+// redirectURIFor is exported for an application that needs to tell a provider
+// what to register.
+func (a *Auth) RedirectURI(name string) (string, error) {
+	return redirectURIFor(a.appURL, name)
 }
