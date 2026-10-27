@@ -120,8 +120,8 @@ func (p *Provider) Identity(ctx context.Context, code, redirectURI string) (*aut
 
 	identity := &auth.SocialIdentity{
 		Provider: Name,
-		// The OpenID subject. Stable for the life of the account, and
-		// deliberately not the email — a Google Workspace address can be
+		// The OpenID subject. Stable for the life of the account, and not
+		// the email — a Google Workspace address can be
 		// reassigned to a new person when somebody leaves, and a link that
 		// followed the email would follow it to them.
 		Subject:       profile.Subject,
@@ -168,7 +168,7 @@ func (p *Provider) exchange(ctx context.Context, code, redirectURI string) (stri
 		return "", errors.New("google: the exchange returned no token")
 	}
 
-	// The id_token is deliberately ignored.
+	// The id_token is ignored.
 	//
 	// Verifying it means fetching and caching Google's signing keys and
 	// checking an audience, an issuer and an expiry — four more things to get

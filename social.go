@@ -93,8 +93,8 @@ type SocialProvider interface {
 	// Identity exchanges the code a provider sent back for who it says this
 	// person is.
 	//
-	// The access token is deliberately not returned. This flow signs
-	// somebody in and wants nothing else from the provider, so holding a
+	// The access token is not returned. This flow signs somebody in and
+	// wants nothing else from the provider, so holding a
 	// token would be holding a credential to somebody else's service for no
 	// reason — and a credential nobody needs is one that can only leak.
 	Identity(ctx context.Context, code, redirectURI string) (*SocialIdentity, error)

@@ -107,9 +107,8 @@ func New() *Auth {
 func (ap *Provider) Provide(a app.App) error {
 	slog.Debug("Registering Auth")
 
-	// &auth.Provider{} is the obvious way to write it, and it used to
-	// nil-dereference on the next line. An unconfigured provider takes the
-	// defaults, which is sessions on and no JWT.
+	// An unconfigured &auth.Provider{} is valid and takes the defaults:
+	// sessions on, no JWT.
 	if ap.Opts == nil {
 		ap.Opts = &Opts{}
 	}
@@ -314,9 +313,10 @@ func (a *Auth) Protected(c app.Context) error {
 // cookie or a bearer token, because both ended in the same call.
 func (a *Auth) Check(c app.Context) error {
 	// Refuse when there is no mechanism to authenticate against. Returning nil
-	// here would mean "authenticated", which made Protected admit anyone and
-	// Guest turn everyone away — an app configured with DisableSession and no
-	// JWT secret had a wide open protected area and an unreachable login page.
+	// here would mean "authenticated", so Protected would admit anyone and
+	// Guest would turn everyone away: an app configured with DisableSession
+	// and no JWT secret would have a wide open protected area and an
+	// unreachable login page.
 	if a.sess == nil && len(a.jwtSecret) == 0 {
 		return ErrNoAuthMechanism
 	}
@@ -368,11 +368,9 @@ func (a *Auth) Check(c app.Context) error {
 // carries.
 //
 // Each configured mechanism gets a turn, and only the failure of all of them
-// is a failure. This used to be two sequential ifs that both had to succeed:
-// a session holding no user returned immediately, so with sessions enabled —
-// the default — the bearer-token branch was unreachable code; and a session
-// that did hold a user fell through into the JWT branch, which then rejected
-// the request for carrying no token.
+// is a failure. Sequential checks that all had to succeed would make the
+// later mechanisms unreachable whenever an earlier one is enabled, and would
+// reject a request that carried a session for not also carrying a token.
 func (a *Auth) subjectFromRequest(c app.Context) (string, error) {
 	var failures []error
 
