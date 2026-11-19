@@ -287,6 +287,123 @@ Both shipped drivers are hand-rolled over `net/http`: the dance is one
 redirect and one POST, and an OAuth library's value is in the token refresh
 this never needs.
 
+## More than one population: `auth/subject`
+
+An application with two groups of people who can sign in — customers in one
+table, administrators in another — has **independent primary keys** in each.
+User 42 and administrator 42 are different people.
+
+A credential carries an identifier and nothing else. A session cookie is
+host-only, so the host disambiguates it; a bearer token is not — one signing
+key signs every surface's tokens and an `Authorization` header goes wherever
+the client sends it. So an administrator's token for id 42, presented to a
+customer-facing host, is looked up in the customers table and authenticates
+**customer 42**: a different person, with a different password, in somebody
+else's account.
+
+`auth/subject` puts the population in the identifier.
+
+```go
+const (
+    kindUser  subject.Kind = "user"
+    kindAdmin subject.Kind = "admin"
+)
+
+kinds := subject.MustKinds(kindUser, kindAdmin)
+people := auth.Subjects(kinds).
+    MustRegister(kindUser,  func(c app.Context, key string) (any, error) { … }).
+    MustRegister(kindAdmin, func(c app.Context, key string) (any, error) { … })
+
+&auth.Provider{Opts: &auth.Opts{UserLoader: people.UserLoader()}}
+```
+
+`GetID()` returns `subject.Of(kindAdmin, "42").String()` — `"admin:42"` — and
+one `UserLoader` dispatches to the right table. Each loader is handed only
+keys of **its own** population, so no query ever sees another's.
+
+Four things are refused rather than smoothed over:
+
+- **An unqualified identifier.** `"42"` does not become `"user:42"`. Reading
+  a bare id as the commonest population is how a credential minted for one
+  gets accepted as another, and it would keep every old credential working
+  across a change whose entire point is that they must not.
+- **A population the application does not declare.** `"robot:1"` resolves to
+  nobody rather than to whatever table is first.
+- **A key that could be read as something else** — one holding the
+  separator, a space or a newline. Validated and never repaired: a key
+  quietly re-encoded no longer matches the row it came from.
+- **A population with no loader**, at boot, via `Populations.Check()`. The
+  symptom otherwise is one group able to sign in and refused on their next
+  request, which reads as a session bug.
+
+Everything the bridge can refuse is `ErrUserNotFound` and not a failure,
+which is this package's own contract: an unresolvable credential is a 401
+that logs that person out, where an error is a **503 that tells everybody to
+come back shortly**. A credential issued before a population was renamed is
+the first of those; reporting it as a failure turns a stale cookie into a
+fake outage.
+
+`auth/subject` itself is **standard library only**, so a provisioning command
+or a worker can parse an identifier without linking a web framework. The
+registry that bridges to `UserLoader` needs `app.Context` and therefore lives
+here, in `auth`, as `auth.Populations` — a split its own dependency test
+caught, having first been written the other way round.
+
+## Carrying somebody between hosts: `auth/handoff`
+
+A session cookie is host-only, and in a multi-tenant application that is
+deliberate: it is what keeps one tenant's session out of another's. So
+somebody signed in on a console host has **no credential at all** on a tenant
+host, and "open acme" would land them on a sign-in page.
+
+The hop is an explicit, deliberately feeble credential:
+
+```go
+signer, _ := handoff.NewSigner(secret, kinds)       // secret ≥ 32 bytes
+
+token, _, _ := signer.Mint(subject.Of(kindAdmin, id), "acme")
+// redirect to https://acme.example.com/handoff?t=<token>
+
+grant, err := signer.Verify(ctx, token, "acme", store)
+if err == nil {
+    auth.LoginAs(c, userFor(grant.Subject))
+}
+```
+
+The token travels in a **URL**, because the hop is a redirect a browser
+follows — so it reaches the server log, the browser history and, if the
+landing page loads any third-party asset, a `Referer` header. There is no way
+to make a URL-borne credential private, so this one is made **worthless**
+instead: single use, one minute (five at most, enforced at construction),
+bound to one audience, and bound to one population.
+
+Four details are load-bearing:
+
+- **The checks are ordered signature, claims, redemption.** A token is never
+  burned by a request that was going to be refused anyway — otherwise one
+  mistyped host, or one prefetch from a security scanner, consumes a
+  legitimate link and presents its owner with "already used". Two tests
+  assert the refusals do not consume.
+- **`Store.Consume` must be atomic** — one statement whose uniqueness the
+  database enforces, not a read followed by a write. Two clicks on one link,
+  or one click and a prefetching browser, arrive at the same instant often
+  enough to matter. `NewMemoryStore` is for tests and single-process
+  development, and says plainly why it is not a production store: with two
+  instances each has its own map, so the guarantee is silently weakened by
+  the one change that looks like pure capacity.
+- **Every claim is covered by the signature**, including the version. The
+  version is configurable so two applications sharing a key cannot redeem
+  each other's tokens — and that configurability is what made the property
+  testable, since against a single version no token's signature verifies
+  under another prefix.
+- **The audience is compared exactly**, not by prefix. A probe found that
+  gap: swapping the comparison for `strings.HasPrefix` left the suite green,
+  because every audience in it was a uuid and no uuid is a prefix of another.
+  Slugs are not, and slugs are what applications put in hostnames.
+
+`auth/handoff` is standard library plus `auth/subject`, so the minting side
+can be a binary with no HTTP surface.
+
 ## Testing
 
 ```bash
